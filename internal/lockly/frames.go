@@ -165,9 +165,13 @@ func DateWeeklyHex(weekMask int) string {
 	return fmt.Sprintf("%02X", weekMask&0xFF) + "00001800" + "0000000000"
 }
 
-// DateExpiredHex is a window entirely in the past, so the lock always denies:
-// the basis of a credential-preserving suspend. Pair it with user type 0x12.
-func DateExpiredHex() string { return "00010100000001010000" } // 2000-01-01, zero length
+// DateSuspendedHex is a validity window far in the future (2099-01-01), so the
+// lock treats the user as not yet valid and denies them now: the basis of a
+// credential-preserving suspend (pair it with user type 0x12). A past window is
+// NOT used: a PGK728WRHK rejects a year-2000 window with 0x73 error E3 (seen
+// live 2026-11-14), and a future window also stays denied when the lock's clock
+// runs slow, which these locks tend to do.
+func DateSuspendedHex() string { return "63010100006301010001" } // 2099-01-01 00:00..00:01
 
 // AccessUser is one person's record to push to an access-user lock (Visage).
 type AccessUser struct {

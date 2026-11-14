@@ -83,8 +83,9 @@ func TestDateHelpers(t *testing.T) {
 	if got := DateWeeklyHex(0x7F); got != "7F000018000000000000" {
 		t.Fatalf("DateWeeklyHex = %s", got)
 	}
-	if got := DateExpiredHex(); len(got) != 20 {
-		t.Fatalf("DateExpiredHex wrong length: %s", got)
+	// a future (pending) window, not a past one; see the helper's note
+	if got := DateSuspendedHex(); got != "63010100006301010001" {
+		t.Fatalf("DateSuspendedHex = %s", got)
 	}
 }
 

@@ -56,7 +56,7 @@ func (a *API) pushPerson(ctx context.Context, lk *store.Lock, p *store.Person) e
 	}
 	if !p.Enabled {
 		u.UserType = 0x12
-		u.Date = lockly.DateExpiredHex()
+		u.Date = lockly.DateSuspendedHex()
 	}
 	frame, err := u.BuildAccessUserSet(lk.MC, lk.DeviceID, nonce)
 	if err != nil {

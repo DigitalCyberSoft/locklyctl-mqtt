@@ -247,7 +247,7 @@ func TestPersonEnableDisablePush(t *testing.T) {
 	if !strings.Contains(dis, "01"+"12") {
 		t.Fatalf("disabled push missing type 0x12: %s", dis)
 	}
-	if !strings.Contains(dis, strings.ToUpper(lockly.DateExpiredHex())) {
+	if !strings.Contains(dis, strings.ToUpper(lockly.DateSuspendedHex())) {
 		t.Fatalf("disabled push missing expired window: %s", dis)
 	}
 }
