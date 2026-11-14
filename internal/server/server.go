@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/DigitalCyberSoft/locklyctl-mqtt/internal/device"
 	"github.com/DigitalCyberSoft/locklyctl-mqtt/internal/store"
 	"github.com/DigitalCyberSoft/locklyctl-mqtt/internal/web"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 // Server is the assembled service.
@@ -23,6 +25,7 @@ type Server struct {
 	st   *store.Store
 	hub  *device.Hub
 	http *http.Server
+	acme *autocert.Manager
 }
 
 // New opens the store and assembles the server. Call Close when done.
@@ -49,6 +52,7 @@ func New(cfg config.Config, log *slog.Logger) (*Server, error) {
 	return &Server{
 		cfg: cfg, log: log, st: st, hub: hub,
 		http: &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second},
+		acme: cfg.ACMEManager(),
 	}, nil
 }
 
@@ -67,14 +71,20 @@ func (s *Server) Run(ctx context.Context) error {
 		s.log.Info("mqtt broker listening", "addr", s.cfg.MQTTAddr, "tls", false)
 	}
 	if s.cfg.MQTTTLSAddr != "" {
-		tlsCfg, err := s.cfg.MQTTTLSConfig()
-		if err != nil {
-			return err
+		var tlsCfg *tls.Config
+		if s.acme != nil {
+			tlsCfg = &tls.Config{GetCertificate: s.acme.GetCertificate, MinVersion: tls.VersionTLS12}
+		} else {
+			var err error
+			tlsCfg, err = s.cfg.MQTTTLSConfig()
+			if err != nil {
+				return err
+			}
 		}
 		if err := s.hub.Listen(device.ListenConfig{ID: "tls", Addr: s.cfg.MQTTTLSAddr, TLS: tlsCfg}); err != nil {
 			return err
 		}
-		s.log.Info("mqtt broker listening", "addr", s.cfg.MQTTTLSAddr, "tls", true)
+		s.log.Info("mqtt broker listening", "addr", s.cfg.MQTTTLSAddr, "tls", true, "acme", s.acme != nil)
 	}
 	if err := s.hub.Start(); err != nil {
 		return err
@@ -82,12 +92,34 @@ func (s *Server) Run(ctx context.Context) error {
 	defer s.hub.Stop()
 
 	errCh := make(chan error, 1)
+
+	// ACME HTTP-01 challenge responder (and plain-HTTP to HTTPS redirect).
+	var challenge *http.Server
+	if s.acme != nil {
+		challenge = &http.Server{
+			Addr:              s.cfg.ACME.HTTPAddr,
+			Handler:           s.acme.HTTPHandler(nil),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			s.log.Info("acme http-01 challenge listening", "addr", s.cfg.ACME.HTTPAddr)
+			if err := challenge.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+		s.http.TLSConfig = s.acme.TLSConfig()
+	}
+
 	go func() {
-		s.log.Info("http listening", "addr", s.cfg.HTTPAddr, "tls", s.cfg.HTTPSCert != "")
+		tlsOn := s.acme != nil || s.cfg.HTTPSCert != ""
+		s.log.Info("http listening", "addr", s.cfg.HTTPAddr, "tls", tlsOn, "acme", s.acme != nil)
 		var err error
-		if s.cfg.HTTPSCert != "" {
+		switch {
+		case s.acme != nil:
+			err = s.http.ListenAndServeTLS("", "")
+		case s.cfg.HTTPSCert != "":
 			err = s.http.ListenAndServeTLS(s.cfg.HTTPSCert, s.cfg.HTTPSKey)
-		} else {
+		default:
 			err = s.http.ListenAndServe()
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -99,6 +131,9 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if challenge != nil {
+			_ = challenge.Shutdown(shutCtx)
+		}
 		return s.http.Shutdown(shutCtx)
 	case err := <-errCh:
 		return err

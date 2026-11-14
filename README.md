@@ -75,10 +75,33 @@ $ docker run -p 8080:8080 -p 1883:1883 -v $PWD/data:/data locklyctl-mqtt \
 
 `-http` (`:8080`), `-https-cert`/`-https-key`, `-mqtt` (`:1883`), `-mqtt-tls`
 (`:8883`) with `-mqtt-cert`/`-mqtt-key`, `-public-mqtt-host`,
-`-public-mqtt-port`, `-heartbeat` (seconds), `-db`.
+`-public-mqtt-port`, `-heartbeat` (seconds), `-db`. For automatic TLS:
+`-acme-domains`, `-acme-email`, `-acme-accept-tos`, `-acme-http`, `-acme-cache`,
+`-acme-directory` (see below).
 
 `-public-mqtt-host`/`-public-mqtt-port` are what the server hands a lock through
 `getHeartbeatTime`: the broker address the lock should connect to.
+
+### Let's Encrypt (automatic TLS)
+
+Instead of supplying cert files, let the server obtain and renew a certificate
+from Let's Encrypt (any ACME CA):
+
+```
+locklyctl-mqtt serve \
+  -mqtt-tls :8883 \
+  -acme-domains lock.example.com \
+  -acme-email you@example.com \
+  -acme-accept-tos
+```
+
+The ACME HTTP-01 challenge is answered on `-acme-http` (`:80` by default), which
+must be reachable from the internet at each `-acme-domains` name. The issued
+certificate serves the MQTT TLS listener and the HTTP API (so `-https-cert` and
+`-acme-domains` are mutually exclusive). Certs are cached in `-acme-cache`
+(`acme-cache/`). Point `-acme-directory` at a staging URL while testing to avoid
+the production rate limit. Whether a given lock trusts a Let's Encrypt chain over
+TLS is still unverified on hardware (see the note at the top).
 
 ## Security notes
 

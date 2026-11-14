@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/DigitalCyberSoft/locklyctl-mqtt/internal/config"
@@ -72,7 +73,17 @@ func cmdServe(args []string) error {
 	fs.IntVar(&cfg.PublicMQTTPort, "public-mqtt-port", cfg.PublicMQTTPort, "port locks should connect to")
 	fs.IntVar(&cfg.HeartbeatSeconds, "heartbeat", cfg.HeartbeatSeconds, "MQTT heartbeat seconds handed to locks")
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path")
+	var acmeDomains string
+	fs.StringVar(&acmeDomains, "acme-domains", "", "comma-separated domains for Let's Encrypt TLS (enables ACME; needs -mqtt-tls and -acme-accept-tos)")
+	fs.StringVar(&cfg.ACME.Email, "acme-email", "", "ACME account email (optional)")
+	fs.StringVar(&cfg.ACME.CacheDir, "acme-cache", cfg.ACME.CacheDir, "directory to cache issued ACME certificates")
+	fs.StringVar(&cfg.ACME.DirectoryURL, "acme-directory", "", "ACME directory URL (default Let's Encrypt production; set for staging)")
+	fs.StringVar(&cfg.ACME.HTTPAddr, "acme-http", cfg.ACME.HTTPAddr, "listen address for the ACME HTTP-01 challenge")
+	fs.BoolVar(&cfg.ACME.AcceptTOS, "acme-accept-tos", false, "agree to the CA's terms of service (required to enable ACME)")
 	_ = fs.Parse(args)
+	if acmeDomains != "" {
+		cfg.ACME.Domains = splitAndTrim(acmeDomains)
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	srv, err := server.New(cfg, log)
@@ -85,6 +96,16 @@ func cmdServe(args []string) error {
 	defer stop()
 	log.Info("starting locklyctl-mqtt")
 	return srv.Run(ctx)
+}
+
+func splitAndTrim(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func openStore(args []string, fs *flag.FlagSet) (*store.Store, error) {
