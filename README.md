@@ -7,7 +7,8 @@ PINs and schedules for each lock, and it re-pushes them over the Lockly device
 channel. locklyctl points at it with `--server`.
 
 > **Status: early.** The protocol primitives are ported from locklyctl and
-> pinned by test vectors, and the HTTP/MQTT wiring is tested. **Whether a given
+> pinned by test vectors, and the HTTP and MQTT wiring is tested (MQTT over real
+> sockets, plain and TLS, with a client acting as a lock). **Whether a given
 > lock will accept a non-Lockly broker over TLS is unverified hardware
 > behaviour** (the Wi-Fi module stores its CA separately and may require a
 > Lockly-signed server cert). Prove it on a spare lock before relying on it. See
@@ -124,6 +125,11 @@ in `CONTRACT.md`, section 4.
 
 ## Security notes
 
+- The broker accepts a lock only when its MQTT username, password and client id
+  all match one lock's record, and refuses a username or client id that two
+  locks share (an account can set MQTT logins through a backup import). A
+  connected lock may subscribe only to its own `client/<clientId>` and publish
+  only to `server`, and its state and events count only for its own lock.
 - A lock's master code plus its device id are its AES key. The store holds them;
   nothing logs them. Serve the APIs over TLS in production (`-https-cert`).
 - Account passwords are verified as bcrypt over the SHA-256 that locklyctl sends

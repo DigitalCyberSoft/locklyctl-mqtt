@@ -36,7 +36,14 @@ override). The server is an MQTT broker (mochi-mqtt) plus a protocol handler.
   do not claim it works until tried on a lock.
 
 Lock MQTT credentials (username/password/clientId) are provisioned per lock and
-stored server-side; the broker's auth hook validates them.
+stored server-side. The broker accepts a connection only when all three match one
+lock's record and no other lock claims that username or client id; a client id
+holding an MQTT wildcard (`+`, `#`) is refused. A connected lock may subscribe
+only to `client/<its clientId>` and publish only to `server`; its
+`deviceStateCallback` and access-log events count only for its own device id
+(command replies are matched by `requestId`). A lock is online from when its
+session is established until that connection, not an older one it took over,
+disconnects.
 
 ## 2. locklyctl <-> server REST (the `--server` mode)
 

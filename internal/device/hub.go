@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,9 +27,16 @@ var ErrOffline = errors.New("lock is offline")
 
 // lockLookup is the slice of the store the hub needs (kept small for testing).
 type lockLookup interface {
-	GetLockByMQTTUsername(username string) (*store.Lock, error)
+	LocksByMQTTIdentity(username, clientID string) ([]store.Lock, error)
 	GetLockByDeviceID(deviceID string) (*store.Lock, error)
 	AddEvent(*store.Event) error
+}
+
+// conn is the authenticated connection that holds a client id, and the lock
+// it authenticated as.
+type conn struct {
+	cl       *mqtt.Client
+	deviceID string
 }
 
 // Hub is the MQTT broker plus the Lockly device-channel protocol handler.
@@ -43,7 +51,7 @@ type Hub struct {
 
 	mu      sync.Mutex
 	pending map[string]chan *CommandPayload
-	online  map[string]bool              // clientId -> connected
+	online  map[string]conn              // clientId -> the connection holding it
 	state   map[string]map[string]string // deviceId -> statusKey -> value
 }
 
@@ -56,10 +64,12 @@ func New(st lockLookup, log *slog.Logger) *Hub {
 		store:   st,
 		log:     log,
 		pending: map[string]chan *CommandPayload{},
-		online:  map[string]bool{},
+		online:  map[string]conn{},
 		state:   map[string]map[string]string{},
 	}
-	h.mq = mqtt.New(&mqtt.Options{Logger: log})
+	// InlineClient: mochi's Publish, which sends every command, refuses to run
+	// without it.
+	h.mq = mqtt.New(&mqtt.Options{Logger: log, InlineClient: true})
 	_ = h.mq.AddHook(&hook{h: h}, nil)
 	h.publish = func(topic string, payload []byte, qos byte) error {
 		return h.mq.Publish(topic, payload, false, qos)
@@ -93,7 +103,8 @@ func (h *Hub) Stop() error { return h.mq.Close() }
 func (h *Hub) Online(clientID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.online[clientID]
+	_, ok := h.online[clientID]
+	return ok
 }
 
 // LastState returns the last deviceStateCallback values for a device.
@@ -180,24 +191,32 @@ func (h *Hub) ingest(clientID string, payload []byte) {
 			return
 		}
 	}
+	// State and events count only for the sender's own lock: every lock may
+	// publish to the server topic, so a payload's deviceId alone proves nothing.
+	h.mu.Lock()
+	own := h.online[clientID].deviceID
+	h.mu.Unlock()
+	if own == "" {
+		return
+	}
 	switch env.Header.Name {
 	case NameStateCallback:
-		h.handleState(env.Payload)
+		h.handleState(own, env.Payload)
 	case NameEventLogResponse:
-		h.handleEvents(env.Payload)
+		h.handleEvents(own, env.Payload)
 	}
 }
 
-func (h *Hub) handleState(payload json.RawMessage) {
+func (h *Hub) handleState(own string, payload json.RawMessage) {
 	var sp StatePayload
-	if err := json.Unmarshal(payload, &sp); err != nil || sp.DeviceID == "" {
+	if err := json.Unmarshal(payload, &sp); err != nil || !strings.EqualFold(sp.DeviceID, own) {
 		return
 	}
 	h.mu.Lock()
-	m := h.state[sp.DeviceID]
+	m := h.state[own]
 	if m == nil {
 		m = map[string]string{}
-		h.state[sp.DeviceID] = m
+		h.state[own] = m
 	}
 	for _, s := range sp.States {
 		m[s.StatusKey] = s.StatusValue
@@ -205,7 +224,7 @@ func (h *Hub) handleState(payload json.RawMessage) {
 	h.mu.Unlock()
 }
 
-func (h *Hub) handleEvents(payload json.RawMessage) {
+func (h *Hub) handleEvents(own string, payload json.RawMessage) {
 	var body struct {
 		DeviceID string `json:"deviceId"`
 		Items    []struct {
@@ -215,10 +234,10 @@ func (h *Hub) handleEvents(payload json.RawMessage) {
 			PwdID     *int   `json:"pid"`
 		} `json:"items"`
 	}
-	if err := json.Unmarshal(payload, &body); err != nil || body.DeviceID == "" {
+	if err := json.Unmarshal(payload, &body); err != nil || !strings.EqualFold(body.DeviceID, own) {
 		return
 	}
-	lk, err := h.store.GetLockByDeviceID(body.DeviceID)
+	lk, err := h.store.GetLockByDeviceID(own)
 	if err != nil {
 		return
 	}
@@ -230,23 +249,47 @@ func (h *Hub) handleEvents(payload json.RawMessage) {
 	}
 }
 
-// authenticate validates a lock's MQTT username/password against the store.
-func (h *Hub) authenticate(username, password string) bool {
-	if username == "" {
-		return false
+// lockFor returns the lock whose MQTT username and client id these are, or nil
+// when there is none, when another lock claims either of them too (one lock
+// could then pass as the other), or when the client id holds an MQTT wildcard,
+// which would widen the lock's topic permission (see hook.OnACLCheck).
+func (h *Hub) lockFor(username, clientID string) *store.Lock {
+	if username == "" || clientID == "" || strings.ContainsAny(clientID, "+#") {
+		return nil
 	}
-	lk, err := h.store.GetLockByMQTTUsername(username)
-	if err != nil || lk.MQTTPassword == "" {
+	locks, err := h.store.LocksByMQTTIdentity(username, clientID)
+	if err != nil || len(locks) != 1 {
+		return nil
+	}
+	if lk := &locks[0]; lk.MQTTUsername == username && lk.MQTTClientID == clientID {
+		return lk
+	}
+	return nil
+}
+
+// authenticate validates a lock's MQTT username, password and client id
+// against its record (CONTRACT.md section 1).
+func (h *Hub) authenticate(username, password, clientID string) bool {
+	lk := h.lockFor(username, clientID)
+	if lk == nil || lk.MQTTPassword == "" {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(password), []byte(lk.MQTTPassword)) == 1
 }
 
-func (h *Hub) setOnline(clientID string, up bool) {
+// connected records cl as the connection that holds clientID, for deviceID.
+func (h *Hub) connected(clientID, deviceID string, cl *mqtt.Client) {
 	h.mu.Lock()
-	if up {
-		h.online[clientID] = true
-	} else {
+	h.online[clientID] = conn{cl: cl, deviceID: deviceID}
+	h.mu.Unlock()
+}
+
+// disconnected marks clientID offline unless a newer connection holds it: when
+// a lock reconnects and takes its session over, the old connection's
+// disconnect can arrive after the new connection has registered.
+func (h *Hub) disconnected(clientID string, cl *mqtt.Client) {
+	h.mu.Lock()
+	if c, ok := h.online[clientID]; ok && c.cl == cl {
 		delete(h.online, clientID)
 	}
 	h.mu.Unlock()
@@ -272,23 +315,39 @@ func (hk *hook) ID() string { return "lockly-device" }
 
 func (hk *hook) Provides(b byte) bool {
 	switch b {
-	case mqtt.OnConnectAuthenticate, mqtt.OnConnect, mqtt.OnDisconnect, mqtt.OnPublish:
+	case mqtt.OnConnectAuthenticate, mqtt.OnACLCheck, mqtt.OnSessionEstablished, mqtt.OnDisconnect, mqtt.OnPublish:
 		return true
 	}
 	return false
 }
 
 func (hk *hook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bool {
-	return hk.h.authenticate(string(pk.Connect.Username), string(pk.Connect.Password))
+	return hk.h.authenticate(string(pk.Connect.Username), string(pk.Connect.Password), cl.ID)
 }
 
-func (hk *hook) OnConnect(cl *mqtt.Client, pk packets.Packet) error {
-	hk.h.setOnline(cl.ID, true)
-	return nil
+// OnACLCheck keeps a lock to the device channel: it may read only its own
+// command topic and write only to the server topic. mochi refuses every
+// subscribe and publish that no hook allows, so without this no lock could use
+// the broker at all. cl.ID is the lock's own client id: authentication checked
+// it against the lock's record.
+func (hk *hook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
+	if write {
+		return topic == TopicServer
+	}
+	return topic == TopicClientPrefix+cl.ID
+}
+
+// OnSessionEstablished marks the lock online. mochi runs OnConnect before
+// authentication, so a refused client would show as online if it were done
+// there.
+func (hk *hook) OnSessionEstablished(cl *mqtt.Client, pk packets.Packet) {
+	if lk := hk.h.lockFor(string(cl.Properties.Username), cl.ID); lk != nil {
+		hk.h.connected(cl.ID, lk.DeviceID, cl)
+	}
 }
 
 func (hk *hook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
-	hk.h.setOnline(cl.ID, false)
+	hk.h.disconnected(cl.ID, cl)
 }
 
 func (hk *hook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {

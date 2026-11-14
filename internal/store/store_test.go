@@ -296,3 +296,38 @@ INSERT INTO locks(id, device_id, mc, blename, model, tz, fwv, owner_account_id, 
 		t.Error("hidden not persisted after migration")
 	}
 }
+
+func TestLocksByMQTTIdentity(t *testing.T) {
+	s := open(t)
+	h, _ := HashPassword("x")
+	a, _ := s.CreateAccount("o@example.test", h)
+	mk := func(dev, cid, user string) {
+		if _, err := s.CreateLock(&Lock{DeviceID: dev, MC: "12345678", OwnerAccountID: a.ID,
+			MQTTClientID: cid, MQTTUsername: user, MQTTPassword: "pw"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("aa00000000000000000000a1", "cid-1", "user-1")
+	mk("aa00000000000000000000a2", "cid-2", "user-2")
+	mk("aa00000000000000000000a3", "", "") // no MQTT identity
+	got := func(user, cid string) []string {
+		locks, err := s.LocksByMQTTIdentity(user, cid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, l := range locks {
+			ids = append(ids, l.DeviceID[len(l.DeviceID)-2:])
+		}
+		return ids
+	}
+	if ids := got("user-1", "cid-1"); len(ids) != 1 || ids[0] != "a1" {
+		t.Fatalf("own identity: %v", ids)
+	}
+	if ids := got("user-1", "cid-2"); len(ids) != 2 {
+		t.Fatalf("username of one lock and client id of another should return both: %v", ids)
+	}
+	if ids := got("", ""); len(ids) != 0 {
+		t.Fatalf("empty values must match nothing, got %v", ids)
+	}
+}

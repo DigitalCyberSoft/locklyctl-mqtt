@@ -8,20 +8,25 @@ import (
 	"testing"
 	"time"
 
+	mqtt "github.com/mochi-mqtt/server/v2"
+
 	"github.com/DigitalCyberSoft/locklyctl-mqtt/internal/store"
 )
 
 type fakeStore struct {
-	byUser map[string]*store.Lock
+	locks  []*store.Lock // what LocksByMQTTIdentity searches
 	byDev  map[string]*store.Lock
 	events []*store.Event
 }
 
-func (f *fakeStore) GetLockByMQTTUsername(u string) (*store.Lock, error) {
-	if l, ok := f.byUser[u]; ok {
-		return l, nil
+func (f *fakeStore) LocksByMQTTIdentity(u, cid string) ([]store.Lock, error) {
+	var out []store.Lock
+	for _, l := range f.locks {
+		if (u != "" && l.MQTTUsername == u) || (cid != "" && l.MQTTClientID == cid) {
+			out = append(out, *l)
+		}
 	}
-	return nil, store.ErrNotFound
+	return out, nil
 }
 func (f *fakeStore) GetLockByDeviceID(d string) (*store.Lock, error) {
 	if l, ok := f.byDev[d]; ok {
@@ -32,31 +37,100 @@ func (f *fakeStore) GetLockByDeviceID(d string) (*store.Lock, error) {
 func (f *fakeStore) AddEvent(e *store.Event) error { f.events = append(f.events, e); return nil }
 
 func newTestHub() (*Hub, *fakeStore) {
-	fs := &fakeStore{byUser: map[string]*store.Lock{}, byDev: map[string]*store.Lock{}}
+	fs := &fakeStore{byDev: map[string]*store.Lock{}}
 	return New(fs, nil), fs
 }
 
 func TestAuthenticate(t *testing.T) {
 	h, fs := newTestHub()
-	fs.byUser["lock-u"] = &store.Lock{MQTTUsername: "lock-u", MQTTPassword: "secret"}
+	fs.locks = append(fs.locks, &store.Lock{DeviceID: "d1", MQTTUsername: "lock-u", MQTTPassword: "secret", MQTTClientID: "cid"})
 	cases := []struct {
-		u, p string
-		want bool
+		u, p, cid string
+		want      bool
 	}{
-		{"lock-u", "secret", true},
-		{"lock-u", "wrong", false},
-		{"", "", false},
-		{"nobody", "secret", false},
+		{"lock-u", "secret", "cid", true},
+		{"lock-u", "wrong", "cid", false},
+		{"lock-u", "secret", "other-cid", false}, // the client id must be the lock's own
+		{"lock-u", "secret", "", false},
+		{"", "", "", false},
+		{"nobody", "secret", "cid", false},
 	}
 	for _, c := range cases {
-		if got := h.authenticate(c.u, c.p); got != c.want {
-			t.Fatalf("authenticate(%q,...) = %v, want %v", c.u, got, c.want)
+		if got := h.authenticate(c.u, c.p, c.cid); got != c.want {
+			t.Fatalf("authenticate(%q, %q, %q) = %v, want %v", c.u, c.p, c.cid, got, c.want)
 		}
 	}
 	// a lock with no provisioned password cannot authenticate
-	fs.byUser["bare"] = &store.Lock{MQTTUsername: "bare"}
-	if h.authenticate("bare", "") {
+	fs.locks = append(fs.locks, &store.Lock{DeviceID: "d2", MQTTUsername: "bare", MQTTClientID: "bare-cid"})
+	if h.authenticate("bare", "", "bare-cid") {
 		t.Fatal("authenticated a lock with no password")
+	}
+}
+
+// Neither the MQTT username nor the client id is unique in the store, and an
+// account can set both through a backup import. A second lock claiming either
+// one must not let it pass as the first, so neither gets in.
+func TestAuthenticateRefusesSharedOrWildcardIdentity(t *testing.T) {
+	h, fs := newTestHub()
+	victim := &store.Lock{DeviceID: "d1", MQTTUsername: "victim", MQTTPassword: "pw1", MQTTClientID: "cid-v"}
+	fs.locks = []*store.Lock{victim,
+		{DeviceID: "d2", MQTTUsername: "intruder", MQTTPassword: "pw2", MQTTClientID: "cid-v"}}
+	if h.authenticate("intruder", "pw2", "cid-v") || h.authenticate("victim", "pw1", "cid-v") {
+		t.Fatal("a client id two locks claim was accepted")
+	}
+	fs.locks = []*store.Lock{victim,
+		{DeviceID: "d2", MQTTUsername: "victim", MQTTPassword: "pw2", MQTTClientID: "cid-2"}}
+	if h.authenticate("victim", "pw2", "cid-2") || h.authenticate("victim", "pw1", "cid-v") {
+		t.Fatal("a username two locks claim was accepted")
+	}
+	for _, cid := range []string{"#", "cid/#", "+"} {
+		fs.locks = []*store.Lock{{DeviceID: "d3", MQTTUsername: "w", MQTTPassword: "pw", MQTTClientID: cid}}
+		if h.authenticate("w", "pw", cid) {
+			t.Fatalf("client id %q (an MQTT wildcard) was accepted", cid)
+		}
+	}
+}
+
+func TestACL(t *testing.T) {
+	h, _ := newTestHub()
+	hk := &hook{h: h}
+	cl := &mqtt.Client{ID: "cid"}
+	cases := []struct {
+		topic string
+		write bool
+		want  bool
+	}{
+		{"client/cid", false, true}, // its own commands
+		{"server", true, true},      // everything it sends
+		{"client/cid", true, false},
+		{"server", false, false}, // other locks' messages
+		{"client/other", false, false},
+		{"client/#", false, false},
+		{"client/+", false, false},
+		{"#", false, false},
+		{"client/other", true, false},
+	}
+	for _, c := range cases {
+		if got := hk.OnACLCheck(cl, c.topic, c.write); got != c.want {
+			t.Errorf("OnACLCheck(%q, write=%v) = %v, want %v", c.topic, c.write, got, c.want)
+		}
+	}
+}
+
+// When a lock reconnects and takes its session over, the old connection's
+// disconnect arrives after the new connection is up.
+func TestPresenceSurvivesSessionTakeover(t *testing.T) {
+	h, _ := newTestHub()
+	old, cur := &mqtt.Client{ID: "cid"}, &mqtt.Client{ID: "cid"}
+	h.connected("cid", "2d00", old)
+	h.connected("cid", "2d00", cur)
+	h.disconnected("cid", old)
+	if !h.Online("cid") {
+		t.Fatal("the old connection's disconnect took the lock offline")
+	}
+	h.disconnected("cid", cur)
+	if h.Online("cid") {
+		t.Fatal("still online after the current connection left")
 	}
 }
 
@@ -70,7 +144,7 @@ func TestSendCommandOffline(t *testing.T) {
 
 func TestSendCommandRoundTrip(t *testing.T) {
 	h, _ := newTestHub()
-	h.setOnline("cid", true)
+	h.connected("cid", "2d00", &mqtt.Client{ID: "cid"})
 
 	published := make(chan []byte, 1)
 	h.publish = func(topic string, payload []byte, qos byte) error {
@@ -117,7 +191,7 @@ func TestSendCommandRoundTrip(t *testing.T) {
 
 func TestSendCommandCodeError(t *testing.T) {
 	h, _ := newTestHub()
-	h.setOnline("cid", true)
+	h.connected("cid", "dev", &mqtt.Client{ID: "cid"})
 	published := make(chan []byte, 1)
 	h.publish = func(_ string, payload []byte, _ byte) error { published <- payload; return nil }
 
@@ -140,6 +214,7 @@ func TestSendCommandCodeError(t *testing.T) {
 
 func TestIngestStateCallback(t *testing.T) {
 	h, _ := newTestHub()
+	h.connected("cid", "2d00", &mqtt.Client{ID: "cid"})
 	payload := `{"deviceId":"2d00","states":[{"statusKey":"LOCKED_STATUS","statusValue":"1"},{"statusKey":"MAGNET","statusValue":"0"}]}`
 	env, _ := json.Marshal(Envelope{Header: Header{Name: NameStateCallback}, Payload: json.RawMessage(payload)})
 	h.ingest("cid", env)
@@ -154,12 +229,51 @@ func TestIngestStateCallback(t *testing.T) {
 
 func TestIngestEventsStored(t *testing.T) {
 	h, fs := newTestHub()
+	h.connected("cid", "2d00", &mqtt.Client{ID: "cid"})
 	fs.byDev["2d00"] = &store.Lock{ID: 7, DeviceID: "2d00"}
 	payload := `{"deviceId":"2d00","items":[{"timestamp":1700000000000,"co":1,"pid":4}]}`
 	env, _ := json.Marshal(Envelope{Header: Header{Name: NameEventLogResponse}, Payload: json.RawMessage(payload)})
 	h.ingest("cid", env)
 	if len(fs.events) != 1 || fs.events[0].LockID != 7 || fs.events[0].TM != 1700000000000 {
 		t.Fatalf("event not stored: %+v", fs.events)
+	}
+}
+
+// Any lock may publish to the server topic, so one lock's message about
+// another lock, or a message from a client that isn't a connected lock, is
+// ignored.
+func TestIngestOnlyTheSendersOwnLock(t *testing.T) {
+	h, fs := newTestHub()
+	h.connected("cid", "2d00", &mqtt.Client{ID: "cid"})
+	fs.byDev["2d00"] = &store.Lock{ID: 7, DeviceID: "2d00"}
+	fs.byDev["9f00"] = &store.Lock{ID: 8, DeviceID: "9f00"}
+	state := func(dev string) []byte {
+		env, _ := json.Marshal(Envelope{Header: Header{Name: NameStateCallback}, Payload: json.RawMessage(
+			`{"deviceId":"` + dev + `","states":[{"statusKey":"LOCKED_STATUS","statusValue":"0"}]}`)})
+		return env
+	}
+	events := func(dev string) []byte {
+		env, _ := json.Marshal(Envelope{Header: Header{Name: NameEventLogResponse}, Payload: json.RawMessage(
+			`{"deviceId":"` + dev + `","items":[{"timestamp":1700000000000,"co":1}]}`)})
+		return env
+	}
+	h.ingest("cid", state("9f00"))
+	h.ingest("cid", events("9f00"))
+	h.ingest("ghost", state("2d00"))
+	h.ingest("ghost", events("2d00"))
+	if _, ok := h.LastState("9f00"); ok {
+		t.Fatal("a lock set another lock's state")
+	}
+	if _, ok := h.LastState("2d00"); ok {
+		t.Fatal("a client that isn't a connected lock set a lock's state")
+	}
+	if len(fs.events) != 0 {
+		t.Fatalf("events stored from the wrong sender: %+v", fs.events)
+	}
+	// the lock's own report, in either letter case, is kept under its record's id
+	h.ingest("cid", state("2D00"))
+	if st, ok := h.LastState("2d00"); !ok || st["LOCKED_STATUS"] != "0" {
+		t.Fatalf("the lock's own state was not recorded: %v %v", ok, st)
 	}
 }
 

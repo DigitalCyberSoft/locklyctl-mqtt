@@ -336,13 +336,15 @@ func (s *Store) GetLock(id int64) (*Lock, error) {
 	return scanLock(s.db.QueryRow(`SELECT `+lockCols+` FROM locks WHERE id=?`, id))
 }
 
-// GetLockByMQTTUsername looks a lock up by its provisioned MQTT username, for
-// broker authentication. The username must be non-empty.
-func (s *Store) GetLockByMQTTUsername(username string) (*Lock, error) {
-	if username == "" {
-		return nil, ErrNotFound
-	}
-	return scanLock(s.db.QueryRow(`SELECT `+lockCols+` FROM locks WHERE mqtt_username=?`, username))
+// LocksByMQTTIdentity returns every lock whose provisioned MQTT username is
+// username or whose MQTT client id is clientID (an empty value matches
+// nothing), for broker authentication: the broker accepts a lock only when one
+// lock alone claims both, since neither is unique in the table and an account
+// can set them through a backup import.
+func (s *Store) LocksByMQTTIdentity(username, clientID string) ([]Lock, error) {
+	return s.queryLocks(`SELECT `+lockCols+` FROM locks
+		WHERE (mqtt_username <> '' AND mqtt_username = ?) OR (mqtt_client_id <> '' AND mqtt_client_id = ?)
+		ORDER BY id`, username, clientID)
 }
 
 // ListLocksByAccount returns an account's locks.
