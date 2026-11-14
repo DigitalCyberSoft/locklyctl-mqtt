@@ -32,6 +32,7 @@ type Session struct {
 type Lock struct {
 	ID             int64
 	DeviceID       string // lowercase hex, as the account lists it
+	Name           string // the door's name, as the owner calls it ("" = use BLEName)
 	MC             string // master code (secret)
 	BLEName        string
 	Model          string
@@ -59,18 +60,23 @@ const (
 // a past one with E3), not deleted, so their PIN and any enrolled
 // fingerprint/face survive.
 type Person struct {
-	ID          int64
-	LockID      int64
-	Name        string
-	PwdID       int // credential slot on the lock
-	UserID      int // the account's user id for this person
-	AdminID     int
-	PIN         string // secret; "" means no PIN credential
-	UserType    int    // lockly.UserFamily / UserGuest* byte
-	DateMode    string // DatePermanent / DatePeriod / DateWeekly
-	StartAt     *time.Time
-	EndAt       *time.Time
-	WeekMask    int // bit0=Mon..bit6=Sun, for DateWeekly
+	ID       int64
+	LockID   int64
+	Name     string
+	PwdID    int // credential slot on the lock
+	UserID   int // the account's user id for this person
+	AdminID  int
+	PIN      string // secret; "" means no PIN credential
+	UserType int    // lockly.UserFamily / UserGuest* byte
+	DateMode string // DatePermanent / DatePeriod / DateWeekly
+	StartAt  *time.Time
+	EndAt    *time.Time
+	WeekMask int // bit0=Mon..bit6=Sun, for DateWeekly
+	// DateHex is the exact 10-byte 0x73 date (20 hex digits) as read from the
+	// lock, e.g. by an import. When set it is pushed verbatim instead of one
+	// derived from DateMode, so a weekly window's hours survive (DateMode alone
+	// can only say all-day). Changing the schedule through the API clears it.
+	DateHex     string
 	MultiVerify int
 	Enabled     bool
 	CreatedAt   time.Time

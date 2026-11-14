@@ -87,7 +87,7 @@ func (a *API) hDeleteAccount(w http.ResponseWriter, r *http.Request) {
 func (a *API) lockJSONAdmin(lk *store.Lock) map[string]any {
 	online := lk.MQTTClientID != "" && a.gw.Online(lk.MQTTClientID)
 	return map[string]any{
-		"id": lk.ID, "deviceId": lk.DeviceID, "blename": lk.BLEName, "model": lk.Model,
+		"id": lk.ID, "deviceId": lk.DeviceID, "name": lk.Name, "blename": lk.BLEName, "model": lk.Model,
 		"tz": lk.TZ, "fwv": lk.FWV, "ownerAccountId": lk.OwnerAccountID,
 		"mqttClientId": lk.MQTTClientID, "mqttUsername": lk.MQTTUsername, "online": online,
 		"hidden": lk.Hidden, "sortIndex": lk.SortIndex,
@@ -109,9 +109,9 @@ func (a *API) hListLocks(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) hCreateLock(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DeviceID, MC, BLEName, Model, TZ, FWV    string
-		OwnerAccountID                           int64
-		MQTTClientID, MQTTUsername, MQTTPassword string
+		DeviceID, MC, Name, BLEName, Model, TZ, FWV string
+		OwnerAccountID                              int64
+		MQTTClientID, MQTTUsername, MQTTPassword    string
 	}
 	if err := readJSON(r, &req); err != nil || req.DeviceID == "" || req.MC == "" || req.OwnerAccountID == 0 {
 		adminErr(w, http.StatusBadRequest, "deviceId, mc and ownerAccountId are required")
@@ -122,7 +122,7 @@ func (a *API) hCreateLock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lk, err := a.store.CreateLock(&store.Lock{
-		DeviceID: req.DeviceID, MC: req.MC, BLEName: req.BLEName, Model: req.Model,
+		DeviceID: req.DeviceID, MC: req.MC, Name: req.Name, BLEName: req.BLEName, Model: req.Model,
 		TZ: req.TZ, FWV: req.FWV, OwnerAccountID: req.OwnerAccountID,
 		MQTTClientID: req.MQTTClientID, MQTTUsername: req.MQTTUsername, MQTTPassword: req.MQTTPassword,
 	})
@@ -242,6 +242,9 @@ func personJSON(p *store.Person) map[string]any {
 	if p.EndAt != nil {
 		out["endAt"] = p.EndAt.Unix()
 	}
+	if p.DateHex != "" {
+		out["date"] = p.DateHex // the exact on-lock date, pushed as is
+	}
 	return out
 }
 
@@ -333,6 +336,7 @@ func (a *API) hUpdatePerson(w http.ResponseWriter, r *http.Request) {
 	p.PIN, p.UserType = in.PIN, in.UserType
 	if in.DateMode != "" {
 		p.DateMode = in.DateMode
+		p.DateHex = "" // a schedule sent here replaces the exact one read from the lock
 	}
 	p.StartAt, p.EndAt, p.WeekMask = epochPtr(in.StartAt), epochPtr(in.EndAt), in.WeekMask
 	if in.MultiVerify != 0 {

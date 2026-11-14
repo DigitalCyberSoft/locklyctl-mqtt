@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS locks(
   owner_account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   mqtt_client_id TEXT, mqtt_username TEXT, mqtt_password TEXT,
   hidden INTEGER NOT NULL DEFAULT 0, sort_index INTEGER NOT NULL DEFAULT 0,
+  name TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS people(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS people(
   date_mode TEXT NOT NULL, start_at INTEGER, end_at INTEGER,
   week_mask INTEGER NOT NULL DEFAULT 0, multi_verify INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER NOT NULL DEFAULT 1,
+  date_hex TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,10 +91,17 @@ func (s *Store) migrate() error {
 		return err
 	}
 	// Columns added after the first release: bring older databases forward.
-	if err := s.addColumnIfMissing("locks", "hidden", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
+	for _, c := range []struct{ table, col, decl string }{
+		{"locks", "hidden", "INTEGER NOT NULL DEFAULT 0"},
+		{"locks", "sort_index", "INTEGER NOT NULL DEFAULT 0"},
+		{"locks", "name", "TEXT NOT NULL DEFAULT ''"},
+		{"people", "date_hex", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.addColumnIfMissing(c.table, c.col, c.decl); err != nil {
+			return err
+		}
 	}
-	return s.addColumnIfMissing("locks", "sort_index", "INTEGER NOT NULL DEFAULT 0")
+	return nil
 }
 
 // addColumnIfMissing adds a column when it is not already present, so migrate is
@@ -286,9 +295,10 @@ func (s *Store) CreateLock(l *Lock) (*Lock, error) {
 		l.SortIndex = int(m.Int64) + 1
 	}
 	res, err := s.db.Exec(`INSERT INTO locks(device_id, mc, blename, model, tz, fwv, owner_account_id,
-	    mqtt_client_id, mqtt_username, mqtt_password, hidden, sort_index, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	    mqtt_client_id, mqtt_username, mqtt_password, hidden, sort_index, name, created_at)
+	    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		l.DeviceID, l.MC, l.BLEName, l.Model, l.TZ, l.FWV, l.OwnerAccountID,
-		l.MQTTClientID, l.MQTTUsername, l.MQTTPassword, boolInt(l.Hidden), l.SortIndex, now.Unix())
+		l.MQTTClientID, l.MQTTUsername, l.MQTTPassword, boolInt(l.Hidden), l.SortIndex, l.Name, now.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +312,7 @@ func scanLock(row interface{ Scan(...any) error }) (*Lock, error) {
 	var ca int64
 	var hidden int
 	err := row.Scan(&l.ID, &l.DeviceID, &l.MC, &l.BLEName, &l.Model, &l.TZ, &l.FWV,
-		&l.OwnerAccountID, &l.MQTTClientID, &l.MQTTUsername, &l.MQTTPassword, &hidden, &l.SortIndex, &ca)
+		&l.OwnerAccountID, &l.MQTTClientID, &l.MQTTUsername, &l.MQTTPassword, &hidden, &l.SortIndex, &l.Name, &ca)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -314,7 +324,7 @@ func scanLock(row interface{ Scan(...any) error }) (*Lock, error) {
 	return &l, nil
 }
 
-const lockCols = `id, device_id, mc, blename, model, tz, fwv, owner_account_id, mqtt_client_id, mqtt_username, mqtt_password, hidden, sort_index, created_at`
+const lockCols = `id, device_id, mc, blename, model, tz, fwv, owner_account_id, mqtt_client_id, mqtt_username, mqtt_password, hidden, sort_index, name, created_at`
 
 // GetLockByDeviceID looks a lock up by its device id.
 func (s *Store) GetLockByDeviceID(deviceID string) (*Lock, error) {
@@ -405,11 +415,11 @@ func (s *Store) DeleteLock(id int64) error {
 func (s *Store) CreatePerson(p *Person) (*Person, error) {
 	now := time.Now().UTC()
 	res, err := s.db.Exec(`INSERT INTO people(lock_id, name, pwd_id, user_id, admin_id, pin, user_type,
-	    date_mode, start_at, end_at, week_mask, multi_verify, enabled, created_at, updated_at)
-	    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	    date_mode, start_at, end_at, week_mask, multi_verify, enabled, date_hex, created_at, updated_at)
+	    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.LockID, p.Name, p.PwdID, p.UserID, p.AdminID, p.PIN, p.UserType,
 		p.DateMode, unixPtr(p.StartAt), unixPtr(p.EndAt), p.WeekMask, p.MultiVerify,
-		boolInt(p.Enabled), now.Unix(), now.Unix())
+		boolInt(p.Enabled), p.DateHex, now.Unix(), now.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +433,7 @@ func scanPerson(row interface{ Scan(...any) error }) (*Person, error) {
 	var start, end sql.NullInt64
 	var enabled, ca, ua int64
 	err := row.Scan(&p.ID, &p.LockID, &p.Name, &p.PwdID, &p.UserID, &p.AdminID, &p.PIN, &p.UserType,
-		&p.DateMode, &start, &end, &p.WeekMask, &p.MultiVerify, &enabled, &ca, &ua)
+		&p.DateMode, &start, &end, &p.WeekMask, &p.MultiVerify, &enabled, &p.DateHex, &ca, &ua)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -435,7 +445,7 @@ func scanPerson(row interface{ Scan(...any) error }) (*Person, error) {
 	return &p, nil
 }
 
-const personCols = `id, lock_id, name, pwd_id, user_id, admin_id, pin, user_type, date_mode, start_at, end_at, week_mask, multi_verify, enabled, created_at, updated_at`
+const personCols = `id, lock_id, name, pwd_id, user_id, admin_id, pin, user_type, date_mode, start_at, end_at, week_mask, multi_verify, enabled, date_hex, created_at, updated_at`
 
 // GetPerson looks a person up by id.
 func (s *Store) GetPerson(id int64) (*Person, error) {
@@ -464,10 +474,10 @@ func (s *Store) ListPeopleByLock(lockID int64) ([]Person, error) {
 func (s *Store) UpdatePerson(p *Person) error {
 	p.UpdatedAt = time.Now().UTC()
 	return s.affectOne(s.db.Exec(`UPDATE people SET name=?, pwd_id=?, user_id=?, admin_id=?, pin=?,
-	    user_type=?, date_mode=?, start_at=?, end_at=?, week_mask=?, multi_verify=?, enabled=?, updated_at=?
-	    WHERE id=?`,
+	    user_type=?, date_mode=?, start_at=?, end_at=?, week_mask=?, multi_verify=?, enabled=?, date_hex=?,
+	    updated_at=? WHERE id=?`,
 		p.Name, p.PwdID, p.UserID, p.AdminID, p.PIN, p.UserType, p.DateMode,
-		unixPtr(p.StartAt), unixPtr(p.EndAt), p.WeekMask, p.MultiVerify, boolInt(p.Enabled),
+		unixPtr(p.StartAt), unixPtr(p.EndAt), p.WeekMask, p.MultiVerify, boolInt(p.Enabled), p.DateHex,
 		p.UpdatedAt.Unix(), p.ID))
 }
 

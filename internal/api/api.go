@@ -78,6 +78,9 @@ func (a *API) Routes(mux *http.ServeMux) {
 	// hide/show and reorder the account's own locks.
 	mux.HandleFunc("POST /api/view/hidden", a.authAccount(a.hViewHidden))
 	mux.HandleFunc("POST /api/view/order", a.authAccount(a.hViewOrder))
+	// Backup and migration (an extension): the account's locks and people.
+	mux.HandleFunc("POST /api/backup/export", a.authAccount(a.hBackupExport))
+	mux.HandleFunc("POST /api/backup/import", a.authAccount(a.hBackupImport))
 
 	// management API.
 	mux.HandleFunc("POST /admin/api/login", a.hAdminLogin)

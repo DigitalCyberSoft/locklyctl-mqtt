@@ -165,7 +165,7 @@ async function loadLocks() {
     visible.forEach((l, i) => {
       const tr = document.createElement("tr");
       if (l.hidden) tr.className = "dim";
-      const name = l.blename || l.deviceId || ("lock " + l.id);
+      const name = l.name || l.blename || l.deviceId || ("lock " + l.id);
       tr.innerHTML = `<td class="clickable">${esc(name)}${l.hidden ? ' <span class="pill">hidden</span>' : ""}</td>
         <td class="sub">${esc(l.model || "")}</td>
         <td class="${l.online ? "on" : "offline"}">${l.online ? "online" : "offline"}</td>
@@ -219,7 +219,7 @@ async function loadAccounts() {
 async function selectLock(l) {
   currentLock = l;
   const d = await api("GET", "/admin/api/locks/" + l.id);
-  $("#lockTitle").textContent = (l.blename || l.deviceId);
+  $("#lockTitle").textContent = (l.name || l.blename || l.deviceId);
   $("#lockDetail").innerHTML = `<span class="pill ${d.online ? "on" : "offline"}">${d.online ? "online" : "offline"}</span> `
     + (d.state ? Object.entries(d.state).map(([k, v]) => `<span class="pill">${esc(k)}=${esc(v)}</span>`).join(" ") : "");
   $("#addPerson").classList.remove("hidden");

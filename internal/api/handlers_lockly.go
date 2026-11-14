@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/DigitalCyberSoft/locklyctl-mqtt/internal/backup"
 	"github.com/DigitalCyberSoft/locklyctl-mqtt/internal/store"
 )
 
@@ -13,7 +14,7 @@ import (
 // only to the lock's owner over TLS; locklyctl needs it to build BLE frames.
 func lockJSON(lk *store.Lock) map[string]any {
 	return map[string]any{
-		"ID": lk.DeviceID, "mc": lk.MC, "blename": lk.BLEName,
+		"ID": lk.DeviceID, "na": lk.Name, "mc": lk.MC, "blename": lk.BLEName,
 		"mod": lk.Model, "tz": lk.TZ, "fwv": lk.FWV, "clientId": lk.MQTTClientID,
 		"hidden": lk.Hidden, "sortIndex": lk.SortIndex,
 	}
@@ -215,6 +216,63 @@ func (a *API) hViewOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cod(w, "200", map[string]any{"ok": true})
+}
+
+// hBackupExport returns the signed-in account's locks and people as a plain
+// backup document (CONTRACT.md section 4). It holds master codes and PINs, so
+// it only goes to the owner over TLS; locklyctl seals it with the owner's
+// passphrase before writing it anywhere.
+func (a *API) hBackupExport(w http.ResponseWriter, r *http.Request) {
+	s := subjectOf(r)
+	acc, err := a.store.GetAccount(s.id)
+	if err != nil {
+		cod(w, "990", map[string]any{"msg": err.Error()})
+		return
+	}
+	locks, err := a.store.ExportAccount(s.id)
+	if err != nil {
+		cod(w, "990", map[string]any{"msg": err.Error()})
+		return
+	}
+	doc := backup.FromStore(locks, backup.Source{Kind: "locklyctl-mqtt", Account: acc.Email}, a.now())
+	cod(w, "200", map[string]any{"backup": doc})
+}
+
+// hBackupImport brings a plain backup document into the signed-in account:
+// merged by device id, or with "replace" made exactly the backup's. The server
+// never takes a passphrase: a sealed backup is refused (the client unseals).
+func (a *API) hBackupImport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Backup  json.RawMessage `json:"backup"`
+		Replace bool            `json:"replace"`
+	}
+	if err := readJSON(r, &req); err != nil || len(req.Backup) == 0 {
+		cod(w, "909", map[string]any{"msg": "backup is required"})
+		return
+	}
+	doc, err := backup.Open(req.Backup, "")
+	if err != nil {
+		cod(w, "909", map[string]any{"msg": err.Error()})
+		return
+	}
+	res, err := a.store.ImportAccount(subjectOf(r).id, doc.ToStore(), req.Replace)
+	if err != nil {
+		code := "990"
+		if errors.Is(err, store.ErrInvalidImport) {
+			code = "909"
+		}
+		cod(w, code, map[string]any{"msg": err.Error()})
+		return
+	}
+	conflicts := res.Conflicts
+	if conflicts == nil {
+		conflicts = []string{}
+	}
+	cod(w, "200", map[string]any{
+		"locksAdded": res.LocksAdded, "locksUpdated": res.LocksUpdated, "locksRemoved": res.LocksRemoved,
+		"peopleAdded": res.PeopleAdded, "peopleUpdated": res.PeopleUpdated, "peopleRemoved": res.PeopleRemoved,
+		"conflicts": conflicts,
+	})
 }
 
 func errorEnvelope(msg string) json.RawMessage {

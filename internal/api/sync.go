@@ -29,8 +29,13 @@ func (a *API) nonce(ctx context.Context, lk *store.Lock) (string, error) {
 	return r.Nonce, nil
 }
 
-// personDate is the on-lock validity window for a person when enabled.
+// personDate is the on-lock validity window for a person when enabled: the
+// exact date read from the lock when there is one (an import keeps it, so a
+// weekly window's hours survive), else one built from DateMode.
 func (a *API) personDate(p *store.Person) string {
+	if p.DateHex != "" {
+		return p.DateHex
+	}
 	switch p.DateMode {
 	case store.DatePeriod:
 		if p.StartAt != nil && p.EndAt != nil {

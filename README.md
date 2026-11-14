@@ -103,6 +103,25 @@ certificate serves the MQTT TLS listener and the HTTP API (so `-https-cert` and
 the production rate limit. Whether a given lock trusts a Let's Encrypt chain over
 TLS is still unverified on hardware (see the note at the top).
 
+## Backups and migration
+
+```
+locklyctl-mqtt export -account owner@example.com -out doors.backup      # asks for a passphrase
+locklyctl-mqtt import -account owner@example.com -in doors.backup       # merged into that account
+```
+
+A backup is one file with an account's locks (master codes and MQTT logins
+included) and the people on them (PINs and exact schedules included), sealed
+with a passphrase unless `-no-encrypt`. `export` never overwrites a file and
+writes it owner-only. `import` merges by lock: nothing in the account is
+deleted, and a lock that another account on this server has is left alone and
+reported (it exits non-zero). `-replace` makes the account exactly the
+backup's, after asking or with `-yes`. Nothing is sent to the locks. locklyctl
+reads and writes the same format (`locklyctl backup`, and
+`locklyctl --server URL restore`, which goes through `/api/backup/*`), so a
+backup taken from Lockly with locklyctl comes in the same way. The format is
+in `CONTRACT.md`, section 4.
+
 ## Security notes
 
 - A lock's master code plus its device id are its AES key. The store holds them;
@@ -110,6 +129,10 @@ TLS is still unverified on hardware (see the note at the top).
 - Account passwords are verified as bcrypt over the SHA-256 that locklyctl sends
   (it mirrors Lockly), so set an account password through the management API and
   sign in with the same password from locklyctl.
+- `/api/backup/export` hands the signed-in account its own locks' master codes,
+  MQTT logins and people's PINs, as `qrylknew` already does for master codes:
+  serve it over TLS. The server never takes a backup passphrase; locklyctl seals
+  and opens backups itself.
 
 See `CONTRACT.md` for the wire protocol between locklyctl, this server and locks,
 and `NOTICE` for attribution (the crypto is ported from locklyctl / LocklyHA).
