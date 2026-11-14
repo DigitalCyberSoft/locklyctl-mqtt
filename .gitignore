@@ -1,0 +1,10 @@
+/locklyctl-mqtt
+/dist/
+*.db
+*.db-shm
+*.db-wal
+/data/
+*.pem
+*.key
+*.crt
+coverage.out
