@@ -54,11 +54,16 @@ code string. Auth is a bearer token from `/login`, sent as
 | `POST /api/getHeartbeatTime` | `{"deviceId","model"}` | `{"cod":"200","mqttConfigs":{"host","port"},"heartbeat","clientId"}` |
 | `POST /api/senddata` | `{"deviceId","cmd":"<ble-hex>"}` | `{"cod":"200","ack":"<ble-hex>"}` (relays over MQTT, waits for the lock's reply) |
 | `POST /api/v1/proto/handler` | Lockly event-log envelope | the `lockEventLogQueryResponse` envelope |
+| `POST /api/view/hidden` | `{"deviceId","hidden":bool}` | `{"cod":"200","deviceId","hidden"}` (extension: hide/show one of the account's locks in listings) |
+| `POST /api/view/order` | `{"order":["<deviceId>",...]}` | `{"cod":"200","ok":true}` (extension: the listed locks take that order; unlisted ones keep theirs; an unknown deviceId is `901`) |
 
 `<lock>` object keys (subset of Lockly `qrylknew`, enough for locklyctl):
 `ID` (device id, lowercase hex), `mc` (master code), `blename`, `mod` (model),
 `tz` (e.g. `+8:00`), `fwv`, `clientId`. `mc` is a secret; the server only
-returns it to the lock's owner account over TLS.
+returns it to the lock's owner account over TLS. Two extensions that Lockly's
+reply does not have: `hidden` (bool: leave the lock out of listings; commands,
+including bulk ones, still reach it) and `sortIndex` (int: display order; `arr`
+comes back sorted by it).
 
 locklyctl behaviour in `--server` mode:
 - Skip Lockly's `para` RSA/3DES encryption; send/receive plain JSON.
@@ -72,15 +77,21 @@ Base path `/admin/api`, bearer auth with an operator token (`POST
 
 - `accounts` (the logins locklyctl signs in as): create/list/delete, set password.
 - `locks`: register `{ID, mc, blename, mod, tz, ownerAccountId}`, set MQTT creds,
-  list, show live state + recent events, delete.
+  list (ordered by account, then `sortIndex`), show live state + recent events,
+  delete; hide/unhide (`POST /admin/api/locks/{id}/hidden` `{hidden}`) and
+  reorder within an account (`POST /admin/api/locks/order`
+  `{accountId, order:[lockIds]}`, `204`; a lock from another account is `400`).
 - `people`: a named person on a lock with a PIN and a schedule; create/list/update/delete.
-  **`enabled` is a first-class field.** Disabling a person pushes an expired
-  validity window (not a 1-minute-a-day workaround); enabling re-pushes the real
-  window. PIN changes re-push the 0x73 record.
+  **`enabled` is a first-class field.** Disabling a person pushes a far-future
+  validity window that excludes now (the lock rejects a past window with `E3`),
+  not a 1-minute-a-day workaround; enabling re-pushes the real window. PIN
+  changes re-push the 0x73 record.
 - `events`: read the stored access-log per lock.
 
-The web UI (`/`) is a small console over this API: accounts, locks, people
-(with the enable/disable toggle), and a live state / event view.
+The web UI (`/`) is a small console over this API: accounts, locks (hide and
+unhide, with a "Show hidden" toggle so a hidden lock can always be brought back,
+and move up/down), people (with the enable/disable toggle), and a live state /
+event view.
 
 ## Wi-Fi MQTT override (locklyctl `wifi`)
 

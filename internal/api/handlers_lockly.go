@@ -15,6 +15,7 @@ func lockJSON(lk *store.Lock) map[string]any {
 	return map[string]any{
 		"ID": lk.DeviceID, "mc": lk.MC, "blename": lk.BLEName,
 		"mod": lk.Model, "tz": lk.TZ, "fwv": lk.FWV, "clientId": lk.MQTTClientID,
+		"hidden": lk.Hidden, "sortIndex": lk.SortIndex,
 	}
 }
 
@@ -157,6 +158,63 @@ func (a *API) hEventLog(w http.ResponseWriter, r *http.Request) {
 		"header":  map[string]any{"namespace": "com.lockly", "name": "lockEventLogQueryResponse"},
 		"payload": map[string]any{"deviceId": env.Payload.DeviceID, "items": items},
 	})
+}
+
+// hViewHidden hides or shows one of the account's own locks (a dashboard view
+// preference; the lock stays reachable by commands either way).
+func (a *API) hViewHidden(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DeviceID string `json:"deviceId"`
+		Hidden   bool   `json:"hidden"`
+	}
+	if err := readJSON(r, &req); err != nil || req.DeviceID == "" {
+		cod(w, "909", map[string]any{"msg": "deviceId is required"})
+		return
+	}
+	lk, err := a.accountLock(r, req.DeviceID)
+	if err != nil {
+		cod(w, "901", map[string]any{"msg": "no such lock"})
+		return
+	}
+	if err := a.store.SetLockHidden(lk.ID, req.Hidden); err != nil {
+		cod(w, "990", map[string]any{"msg": err.Error()})
+		return
+	}
+	cod(w, "200", map[string]any{"deviceId": req.DeviceID, "hidden": req.Hidden})
+}
+
+// hViewOrder reorders the account's locks by a list of device ids.
+func (a *API) hViewOrder(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Order []string `json:"order"`
+	}
+	if err := readJSON(r, &req); err != nil || len(req.Order) == 0 {
+		cod(w, "909", map[string]any{"msg": "order (a list of deviceIds) is required"})
+		return
+	}
+	locks, err := a.store.ListLocksByAccount(subjectOf(r).id)
+	if err != nil {
+		cod(w, "990", map[string]any{"msg": err.Error()})
+		return
+	}
+	byDev := make(map[string]int64, len(locks))
+	for i := range locks {
+		byDev[locks[i].DeviceID] = locks[i].ID
+	}
+	ids := make([]int64, 0, len(req.Order))
+	for _, dev := range req.Order {
+		id, ok := byDev[dev]
+		if !ok {
+			cod(w, "901", map[string]any{"msg": "unknown deviceId: " + dev})
+			return
+		}
+		ids = append(ids, id)
+	}
+	if err := a.store.ReorderLocks(subjectOf(r).id, ids); err != nil {
+		cod(w, "990", map[string]any{"msg": err.Error()})
+		return
+	}
+	cod(w, "200", map[string]any{"ok": true})
 }
 
 func errorEnvelope(msg string) json.RawMessage {

@@ -33,6 +33,14 @@
   .err { color:var(--off); }
   .hidden { display:none; }
   .sub { font-size:12px; color:var(--muted); }
+  .cardhead { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  .cardhead h2 { margin:0; }
+  .cardhead .sp { flex:1; }
+  button.small { padding:3px 8px; font-size:12px; }
+  button:disabled { opacity:.35; cursor:default; border-color:var(--line); }
+  .acts { text-align:right; white-space:nowrap; }
+  .acts button { padding:2px 7px; }
+  tr.dim td { opacity:.55; }
 </style>
 </head>
 <body>
@@ -54,8 +62,9 @@
     <div class="cols">
       <div>
         <div class="card">
-          <h2>Locks</h2>
+          <div class="cardhead"><h2>Locks</h2><span class="sp"></span><button id="hiddenToggle" class="small hidden">Show hidden</button></div>
           <table><tbody id="locks"></tbody></table>
+          <div class="msg" id="locksMsg"></div>
         </div>
         <div class="card">
           <h2>Accounts</h2>
@@ -95,6 +104,9 @@
 const $ = s => document.querySelector(s);
 let token = localStorage.getItem("op_token") || "";
 let currentLock = null;
+let accountsById = {};
+let showHidden = false;
+try { showHidden = localStorage.getItem("show_hidden") === "1"; } catch (_) {}
 
 async function api(method, path, body) {
   const opt = { method, headers: {} };
@@ -125,29 +137,81 @@ async function login() {
 
 function logout() { token = ""; localStorage.removeItem("op_token"); currentLock = null; show(false); }
 
-async function refresh() { await loadLocks(); await loadAccounts(); }
+// Accounts first, so the lock list can label each account's group.
+async function refresh() { await loadAccounts(); await loadLocks(); }
 
+// The list is ordered by account, then each account's own order. Hidden locks
+// are left out unless "Show hidden" is on; then they appear dimmed with an
+// Unhide button, so a hidden lock can always be brought back from here.
 async function loadLocks() {
   const d = await api("GET", "/admin/api/locks");
+  const all = d.locks || [];
+  const hiddenCount = all.filter(l => l.hidden).length;
+  const tog = $("#hiddenToggle");
+  tog.textContent = (showHidden ? "Hide hidden" : "Show hidden") + ` (${hiddenCount})`;
+  tog.classList.toggle("hidden", hiddenCount === 0 && !showHidden);
+
+  const byAcct = new Map();
+  all.forEach(l => { if (!byAcct.has(l.ownerAccountId)) byAcct.set(l.ownerAccountId, []); byAcct.get(l.ownerAccountId).push(l); });
+  const multi = byAcct.size > 1;
   $("#locks").innerHTML = "";
-  (d.locks || []).forEach(l => {
-    const tr = document.createElement("tr");
-    const name = l.blename || l.deviceId || ("lock " + l.id);
-    tr.innerHTML = `<td class="clickable">${esc(name)}</td>
-      <td class="sub">${esc(l.model || "")}</td>
-      <td class="${l.online ? "on" : "offline"}">${l.online ? "online" : "offline"}</td>`;
-    tr.querySelector(".clickable").onclick = () => selectLock(l);
-    $("#locks").appendChild(tr);
+  byAcct.forEach((locks, acct) => {
+    const visible = locks.filter(l => showHidden || !l.hidden);
+    if (multi && visible.length) {
+      const g = document.createElement("tr");
+      g.innerHTML = `<td colspan="4" class="sub">${esc((accountsById[acct] || {}).email || ("account " + acct))}</td>`;
+      $("#locks").appendChild(g);
+    }
+    visible.forEach((l, i) => {
+      const tr = document.createElement("tr");
+      if (l.hidden) tr.className = "dim";
+      const name = l.blename || l.deviceId || ("lock " + l.id);
+      tr.innerHTML = `<td class="clickable">${esc(name)}${l.hidden ? ' <span class="pill">hidden</span>' : ""}</td>
+        <td class="sub">${esc(l.model || "")}</td>
+        <td class="${l.online ? "on" : "offline"}">${l.online ? "online" : "offline"}</td>
+        <td class="acts"><button data-up title="Move up"${i === 0 ? " disabled" : ""}>&uarr;</button>
+          <button data-down title="Move down"${i === visible.length - 1 ? " disabled" : ""}>&darr;</button>
+          <button data-h>${l.hidden ? "Unhide" : "Hide"}</button></td>`;
+      tr.querySelector(".clickable").onclick = () => selectLock(l);
+      tr.querySelector("[data-up]").onclick = () => move(locks, visible, i, -1);
+      tr.querySelector("[data-down]").onclick = () => move(locks, visible, i, 1);
+      tr.querySelector("[data-h]").onclick = () => setHidden(l, !l.hidden);
+      $("#locks").appendChild(tr);
+    });
   });
+  const shown = all.filter(l => showHidden || !l.hidden).length;
+  $("#locksMsg").textContent = all.length && !shown
+    ? "Every lock is hidden. Use \"Show hidden\" to bring them back." : "";
+}
+
+async function setHidden(l, hidden) {
+  try { await api("POST", "/admin/api/locks/" + l.id + "/hidden", { hidden }); $("#locksMsg").textContent = ""; }
+  catch (e) { $("#locksMsg").textContent = e.message; }
+  await loadLocks();
+}
+
+// Move a lock past exactly one visible neighbour, keeping hidden locks where
+// they are in the account's full order.
+async function move(locks, visible, i, dir) {
+  const target = visible[i], neighbour = visible[i + dir];
+  if (!neighbour) return;
+  const order = locks.map(l => l.id).filter(id => id !== target.id);
+  order.splice(order.indexOf(neighbour.id) + (dir > 0 ? 1 : 0), 0, target.id);
+  try { await api("POST", "/admin/api/locks/order", { accountId: target.ownerAccountId, order }); $("#locksMsg").textContent = ""; }
+  catch (e) { $("#locksMsg").textContent = e.message; }
+  await loadLocks();
 }
 
 async function loadAccounts() {
   const d = await api("GET", "/admin/api/accounts");
+  accountsById = {};
   $("#accounts").innerHTML = "";
   (d.accounts || []).forEach(a => {
+    accountsById[a.id] = a;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${esc(a.email)}</td><td style="text-align:right"><button data-id="${a.id}">Delete</button></td>`;
-    tr.querySelector("button").onclick = async () => { await api("DELETE", "/admin/api/accounts/" + a.id); loadAccounts(); };
+    // Deleting an account cascades to its locks, so reload both lists.
+    tr.querySelector("button").onclick = async () => { await api("DELETE", "/admin/api/accounts/" + a.id); refresh(); };
     $("#accounts").appendChild(tr);
   });
 }
@@ -210,6 +274,11 @@ $("#loginBtn").onclick = login;
 $("#logout").onclick = logout;
 $("#aAdd").onclick = addAccount;
 $("#pAdd").onclick = addPerson;
+$("#hiddenToggle").onclick = () => {
+  showHidden = !showHidden;
+  try { localStorage.setItem("show_hidden", showHidden ? "1" : "0"); } catch (_) {}
+  loadLocks();
+};
 $("#lpass").addEventListener("keydown", e => { if (e.key === "Enter") login(); });
 
 (async () => { if (token) { try { await api("GET", "/admin/api/locks"); show(true); await refresh(); } catch (_) { logout(); } } else show(false); })();

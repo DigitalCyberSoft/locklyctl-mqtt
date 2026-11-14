@@ -41,6 +41,8 @@ type Lock struct {
 	MQTTClientID   string
 	MQTTUsername   string
 	MQTTPassword   string // secret
+	Hidden         bool   // hidden in listing views (still reachable by commands)
+	SortIndex      int    // display order within the owner account
 	CreatedAt      time.Time
 }
 
@@ -53,8 +55,9 @@ const (
 
 // Person is someone with access to a lock: a PIN and a schedule, pushed to the
 // lock as a 0x73 record. Enabled is a first-class suspend toggle: a disabled
-// person is pushed with an expired window, not deleted, so their PIN and any
-// enrolled fingerprint/face survive.
+// person is pushed with a far-future window that excludes now (the lock rejects
+// a past one with E3), not deleted, so their PIN and any enrolled
+// fingerprint/face survive.
 type Person struct {
 	ID          int64
 	LockID      int64

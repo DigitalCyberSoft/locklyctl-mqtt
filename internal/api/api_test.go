@@ -196,6 +196,81 @@ func TestLocklyFacingFlow(t *testing.T) {
 	}
 }
 
+func TestAdminHideAndReorderLocks(t *testing.T) {
+	srv, st, _ := setup(t)
+	op := opToken(t, srv, st)
+	_, acc := do(t, srv, "POST", "/admin/api/accounts", op, map[string]any{"email": "owner@example.test", "password": "secret"})
+	accID := int64(acc["id"].(float64))
+	mk := func(dev string) int64 {
+		_, lk := do(t, srv, "POST", "/admin/api/locks", op, map[string]any{"DeviceID": dev, "MC": tMC, "OwnerAccountID": accID})
+		return int64(lk["id"].(float64))
+	}
+	id1 := mk("aa00000000000000000000b1")
+	id2 := mk("aa00000000000000000000b2")
+
+	code, lk := do(t, srv, "POST", "/admin/api/locks/"+strconv.FormatInt(id1, 10)+"/hidden", op, map[string]any{"hidden": true})
+	if code != 200 || lk["hidden"] != true {
+		t.Fatalf("hidden set = %d %v", code, lk)
+	}
+
+	_, ls := do(t, srv, "GET", "/admin/api/locks", op, nil)
+	locks := ls["locks"].([]any)
+	if len(locks) != 2 {
+		t.Fatalf("locks = %v", ls)
+	}
+	if first := locks[0].(map[string]any); int64(first["id"].(float64)) != id1 || first["hidden"] != true {
+		t.Fatalf("first lock = %v", first)
+	}
+
+	code, _ = do(t, srv, "POST", "/admin/api/locks/order", op, map[string]any{"accountId": accID, "order": []int64{id2, id1}})
+	if code != 204 {
+		t.Fatalf("reorder = %d", code)
+	}
+	_, ls = do(t, srv, "GET", "/admin/api/locks", op, nil)
+	locks = ls["locks"].([]any)
+	if int64(locks[0].(map[string]any)["id"].(float64)) != id2 {
+		t.Fatalf("after reorder first = %v", locks[0])
+	}
+}
+
+func TestAccountViewHiddenAndOrder(t *testing.T) {
+	srv, st, _ := setup(t)
+	op := opToken(t, srv, st)
+	_, acc := do(t, srv, "POST", "/admin/api/accounts", op, map[string]any{"email": "owner@example.test", "password": "secret"})
+	accID := int64(acc["id"].(float64))
+	dev1, dev2 := "aa00000000000000000000b1", "aa00000000000000000000b2"
+	for _, d := range []string{dev1, dev2} {
+		do(t, srv, "POST", "/admin/api/locks", op, map[string]any{"DeviceID": d, "MC": tMC, "OwnerAccountID": accID})
+	}
+	_, lg := do(t, srv, "POST", "/api/login", "", map[string]any{"email": "owner@example.test", "password": store.SHA256Hex("secret")})
+	tok := lg["token"].(string)
+
+	if _, hv := do(t, srv, "POST", "/api/view/hidden", tok, map[string]any{"deviceId": dev1, "hidden": true}); hv["cod"] != "200" {
+		t.Fatalf("view hidden = %v", hv)
+	}
+	if _, ov := do(t, srv, "POST", "/api/view/order", tok, map[string]any{"order": []string{dev2, dev1}}); ov["cod"] != "200" {
+		t.Fatalf("view order = %v", ov)
+	}
+
+	_, ui := do(t, srv, "POST", "/api/getUserInfoAndDvList", tok, map[string]any{})
+	arr := ui["arr"].([]any)
+	if len(arr) != 2 {
+		t.Fatalf("arr = %v", ui)
+	}
+	if first := arr[0].(map[string]any); first["ID"] != dev2 {
+		t.Fatalf("order not applied, first = %v", first["ID"])
+	}
+	for _, e := range arr {
+		if m := e.(map[string]any); m["ID"] == dev1 && m["hidden"] != true {
+			t.Fatalf("dev1 not hidden: %v", m)
+		}
+	}
+
+	if _, bad := do(t, srv, "POST", "/api/view/order", tok, map[string]any{"order": []string{"zz00000000000000000000zz"}}); bad["cod"] == "200" {
+		t.Fatal("unknown deviceId accepted")
+	}
+}
+
 func TestSenddataOffline(t *testing.T) {
 	srv, st, gw := setup(t)
 	op := opToken(t, srv, st)

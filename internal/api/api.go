@@ -74,6 +74,10 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/getHeartbeatTime", a.authAccount(a.hHeartbeat))
 	mux.HandleFunc("POST /api/senddata", a.authAccount(a.hSenddata))
 	mux.HandleFunc("POST /api/v1/proto/handler", a.authAccount(a.hEventLog))
+	// Dashboard view preferences (a locklyctl-mqtt extension, not a Lockly name):
+	// hide/show and reorder the account's own locks.
+	mux.HandleFunc("POST /api/view/hidden", a.authAccount(a.hViewHidden))
+	mux.HandleFunc("POST /api/view/order", a.authAccount(a.hViewOrder))
 
 	// management API.
 	mux.HandleFunc("POST /admin/api/login", a.hAdminLogin)
@@ -90,6 +94,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/api/people/{id}/enabled", a.authOp(a.hSetPersonEnabled))
 	mux.HandleFunc("DELETE /admin/api/people/{id}", a.authOp(a.hDeletePerson))
 	mux.HandleFunc("GET /admin/api/locks/{id}/events", a.authOp(a.hListEvents))
+	mux.HandleFunc("POST /admin/api/locks/order", a.authOp(a.hReorderLocks))
+	mux.HandleFunc("POST /admin/api/locks/{id}/hidden", a.authOp(a.hSetLockHidden))
 }
 
 // ---- JSON helpers ----

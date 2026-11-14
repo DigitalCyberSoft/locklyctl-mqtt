@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS locks(
   blename TEXT, model TEXT, tz TEXT, fwv TEXT,
   owner_account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   mqtt_client_id TEXT, mqtt_username TEXT, mqtt_password TEXT,
+  hidden INTEGER NOT NULL DEFAULT 0, sort_index INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS people(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +85,40 @@ CREATE INDEX IF NOT EXISTS idx_events_lock ON events(lock_id, tm);
 `
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// Columns added after the first release: bring older databases forward.
+	if err := s.addColumnIfMissing("locks", "hidden", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	return s.addColumnIfMissing("locks", "sort_index", "INTEGER NOT NULL DEFAULT 0")
+}
+
+// addColumnIfMissing adds a column when it is not already present, so migrate is
+// idempotent on databases created by an earlier version. table, col and decl are
+// internal constants, never user input.
+func (s *Store) addColumnIfMissing(table, col, decl string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == col {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + decl)
 	return err
 }
 
@@ -245,10 +279,16 @@ func (s *Store) DeleteSession(token string) error {
 // CreateLock registers a lock under an account.
 func (s *Store) CreateLock(l *Lock) (*Lock, error) {
 	now := time.Now().UTC()
+	if l.SortIndex == 0 {
+		// Append new locks after the account's existing ones.
+		var m sql.NullInt64
+		_ = s.db.QueryRow(`SELECT MAX(sort_index) FROM locks WHERE owner_account_id=?`, l.OwnerAccountID).Scan(&m)
+		l.SortIndex = int(m.Int64) + 1
+	}
 	res, err := s.db.Exec(`INSERT INTO locks(device_id, mc, blename, model, tz, fwv, owner_account_id,
-	    mqtt_client_id, mqtt_username, mqtt_password, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+	    mqtt_client_id, mqtt_username, mqtt_password, hidden, sort_index, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		l.DeviceID, l.MC, l.BLEName, l.Model, l.TZ, l.FWV, l.OwnerAccountID,
-		l.MQTTClientID, l.MQTTUsername, l.MQTTPassword, now.Unix())
+		l.MQTTClientID, l.MQTTUsername, l.MQTTPassword, boolInt(l.Hidden), l.SortIndex, now.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -260,19 +300,21 @@ func (s *Store) CreateLock(l *Lock) (*Lock, error) {
 func scanLock(row interface{ Scan(...any) error }) (*Lock, error) {
 	var l Lock
 	var ca int64
+	var hidden int
 	err := row.Scan(&l.ID, &l.DeviceID, &l.MC, &l.BLEName, &l.Model, &l.TZ, &l.FWV,
-		&l.OwnerAccountID, &l.MQTTClientID, &l.MQTTUsername, &l.MQTTPassword, &ca)
+		&l.OwnerAccountID, &l.MQTTClientID, &l.MQTTUsername, &l.MQTTPassword, &hidden, &l.SortIndex, &ca)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	l.Hidden = hidden != 0
 	l.CreatedAt = time.Unix(ca, 0).UTC()
 	return &l, nil
 }
 
-const lockCols = `id, device_id, mc, blename, model, tz, fwv, owner_account_id, mqtt_client_id, mqtt_username, mqtt_password, created_at`
+const lockCols = `id, device_id, mc, blename, model, tz, fwv, owner_account_id, mqtt_client_id, mqtt_username, mqtt_password, hidden, sort_index, created_at`
 
 // GetLockByDeviceID looks a lock up by its device id.
 func (s *Store) GetLockByDeviceID(deviceID string) (*Lock, error) {
@@ -295,12 +337,12 @@ func (s *Store) GetLockByMQTTUsername(username string) (*Lock, error) {
 
 // ListLocksByAccount returns an account's locks.
 func (s *Store) ListLocksByAccount(accountID int64) ([]Lock, error) {
-	return s.queryLocks(`SELECT `+lockCols+` FROM locks WHERE owner_account_id=? ORDER BY id`, accountID)
+	return s.queryLocks(`SELECT `+lockCols+` FROM locks WHERE owner_account_id=? ORDER BY sort_index, id`, accountID)
 }
 
 // ListLocks returns every lock.
 func (s *Store) ListLocks() ([]Lock, error) {
-	return s.queryLocks(`SELECT ` + lockCols + ` FROM locks ORDER BY id`)
+	return s.queryLocks(`SELECT ` + lockCols + ` FROM locks ORDER BY owner_account_id, sort_index, id`)
 }
 
 func (s *Store) queryLocks(q string, args ...any) ([]Lock, error) {
@@ -324,6 +366,32 @@ func (s *Store) queryLocks(q string, args ...any) ([]Lock, error) {
 func (s *Store) SetLockMQTT(id int64, clientID, username, password string) error {
 	return s.affectOne(s.db.Exec(`UPDATE locks SET mqtt_client_id=?, mqtt_username=?, mqtt_password=? WHERE id=?`,
 		clientID, username, password, id))
+}
+
+// SetLockHidden toggles whether a lock is hidden in listing views.
+func (s *Store) SetLockHidden(id int64, hidden bool) error {
+	return s.affectOne(s.db.Exec(`UPDATE locks SET hidden=? WHERE id=?`, boolInt(hidden), id))
+}
+
+// ReorderLocks sets each listed lock's sort_index to its position in orderedIDs.
+// Every id must belong to accountID; a missing or foreign id is an error and the
+// whole reorder rolls back. Locks not listed keep their current sort_index.
+func (s *Store) ReorderLocks(accountID int64, orderedIDs []int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for pos, id := range orderedIDs {
+		res, err := tx.Exec(`UPDATE locks SET sort_index=? WHERE id=? AND owner_account_id=?`, pos, id, accountID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+	}
+	return tx.Commit()
 }
 
 // DeleteLock removes a lock and its people (cascade).

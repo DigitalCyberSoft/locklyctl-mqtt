@@ -43,7 +43,8 @@ func (a *API) personDate(p *store.Person) string {
 }
 
 // pushPerson writes a person's record to the lock (0x73). A disabled person is
-// pushed with an expired window so their PIN and enrolled face/fingerprint
+// pushed with a far-future window that excludes now (DateSuspendedHex; the lock
+// rejects a past window with E3), so their PIN and enrolled face/fingerprint
 // survive (verified on hardware); enabling re-pushes the real window.
 func (a *API) pushPerson(ctx context.Context, lk *store.Lock, p *store.Person) error {
 	nonce, err := a.nonce(ctx, lk)

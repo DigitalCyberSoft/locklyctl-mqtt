@@ -90,6 +90,7 @@ func (a *API) lockJSONAdmin(lk *store.Lock) map[string]any {
 		"id": lk.ID, "deviceId": lk.DeviceID, "blename": lk.BLEName, "model": lk.Model,
 		"tz": lk.TZ, "fwv": lk.FWV, "ownerAccountId": lk.OwnerAccountID,
 		"mqttClientId": lk.MQTTClientID, "mqttUsername": lk.MQTTUsername, "online": online,
+		"hidden": lk.Hidden, "sortIndex": lk.SortIndex,
 	}
 }
 
@@ -164,6 +165,47 @@ func (a *API) hDeleteLock(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.store.DeleteLock(id); err != nil {
 		adminErr(w, http.StatusNotFound, "no such lock")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) hSetLockHidden(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		adminErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	var req struct {
+		Hidden bool `json:"hidden"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		adminErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if err := a.store.SetLockHidden(id, req.Hidden); err != nil {
+		adminErr(w, http.StatusNotFound, "no such lock")
+		return
+	}
+	lk, err := a.store.GetLock(id)
+	if err != nil {
+		adminErr(w, http.StatusNotFound, "no such lock")
+		return
+	}
+	writeJSON(w, http.StatusOK, a.lockJSONAdmin(lk))
+}
+
+func (a *API) hReorderLocks(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AccountID int64   `json:"accountId"`
+		Order     []int64 `json:"order"`
+	}
+	if err := readJSON(r, &req); err != nil || req.AccountID == 0 || len(req.Order) == 0 {
+		adminErr(w, http.StatusBadRequest, "accountId and order (lock ids) are required")
+		return
+	}
+	if err := a.store.ReorderLocks(req.AccountID, req.Order); err != nil {
+		adminErr(w, http.StatusBadRequest, "could not reorder (every id must belong to the account)")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

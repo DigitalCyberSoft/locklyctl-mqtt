@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -193,5 +194,105 @@ func TestEvents(t *testing.T) {
 	}
 	if evs[0].TM != 1002 { // newest first
 		t.Fatalf("order wrong: %d", evs[0].TM)
+	}
+}
+
+func lockIDs(ls []Lock) []int64 {
+	out := make([]int64, len(ls))
+	for i := range ls {
+		out[i] = ls[i].ID
+	}
+	return out
+}
+
+func TestLockHideAndReorder(t *testing.T) {
+	s := open(t)
+	h, _ := HashAccountPassword("pw")
+	a, _ := s.CreateAccount("owner@example.test", h)
+	mk := func(dev string, acct int64) *Lock {
+		l, err := s.CreateLock(&Lock{DeviceID: dev, MC: "12345678", OwnerAccountID: acct})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	l1 := mk("aa00000000000000000000b1", a.ID)
+	l2 := mk("aa00000000000000000000b2", a.ID)
+	l3 := mk("aa00000000000000000000b3", a.ID)
+
+	// New locks append in creation order, none hidden.
+	locks, err := s.ListLocksByAccount(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lockIDs(locks); len(got) != 3 || got[0] != l1.ID || got[2] != l3.ID {
+		t.Fatalf("initial order = %v", got)
+	}
+	if locks[0].Hidden {
+		t.Error("new lock should not be hidden")
+	}
+
+	// Hiding a lock keeps it listed, only flags it.
+	if err := s.SetLockHidden(l2.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetLock(l2.ID); !got.Hidden {
+		t.Fatal("hidden not persisted")
+	}
+
+	// Reorder to l3, l1, l2.
+	if err := s.ReorderLocks(a.ID, []int64{l3.ID, l1.ID, l2.ID}); err != nil {
+		t.Fatal(err)
+	}
+	locks, _ = s.ListLocksByAccount(a.ID)
+	for i, id := range []int64{l3.ID, l1.ID, l2.ID} {
+		if locks[i].ID != id {
+			t.Fatalf("reordered = %v", lockIDs(locks))
+		}
+	}
+
+	// A lock from another account cannot be reordered into this one.
+	b, _ := s.CreateAccount("other@example.test", h)
+	bl := mk("aa00000000000000000000c1", b.ID)
+	if err := s.ReorderLocks(a.ID, []int64{bl.ID}); err == nil {
+		t.Fatal("reorder across accounts should fail")
+	}
+}
+
+func TestMigrateAddsLockColumnsToOldDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	// A database created before hidden/sort_index existed.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`CREATE TABLE accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL, pw_hash BLOB NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE locks(id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT UNIQUE NOT NULL, mc TEXT NOT NULL, blename TEXT, model TEXT, tz TEXT, fwv TEXT, owner_account_id INTEGER NOT NULL, mqtt_client_id TEXT, mqtt_username TEXT, mqtt_password TEXT, created_at INTEGER NOT NULL);
+INSERT INTO accounts(id, email, pw_hash, created_at) VALUES(1, 'o@example.test', x'00', 0);
+INSERT INTO locks(id, device_id, mc, blename, model, tz, fwv, owner_account_id, mqtt_client_id, mqtt_username, mqtt_password, created_at)
+  VALUES(1, 'aa00112233445566778899bb', '12345678', '', '', '', '', 1, '', '', '', 0);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	// Opening through the store runs migrate, which must add the new columns.
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open/migrate old db: %v", err)
+	}
+	defer s.Close()
+	lk, err := s.GetLockByDeviceID("aa00112233445566778899bb")
+	if err != nil {
+		t.Fatalf("read migrated lock: %v", err)
+	}
+	if lk.Hidden {
+		t.Error("migrated lock should default to not hidden")
+	}
+	if err := s.SetLockHidden(lk.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if lk, _ = s.GetLockByDeviceID("aa00112233445566778899bb"); !lk.Hidden {
+		t.Error("hidden not persisted after migration")
 	}
 }
