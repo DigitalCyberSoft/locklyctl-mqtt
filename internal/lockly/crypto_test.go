@@ -7,7 +7,8 @@ import (
 )
 
 // Vectors generated from locklyctl (Python) so this port stays byte-identical:
-//   mc="24860092" uuid="2d0023003030471333363838" nonce="1122334455667788"
+//
+//	mc="24860092" uuid="2d0023003030471333363838" nonce="1122334455667788"
 const (
 	vecMC    = "24860092"
 	vecUUID  = "2d0023003030471333363838"

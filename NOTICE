@@ -1,0 +1,16 @@
+locklyctl-mqtt - a self-hosted MQTT server and management backend for Lockly
+Wi-Fi locks.
+
+Not affiliated with, authorised by, or endorsed by Lockly Security Inc. /
+PIN GENIE LIMITED. "Lockly" and the lock model names are trademarks of their
+owner, used here only to identify the hardware.
+
+The BLE frame crypto and builders in internal/lockly (AES key derivation,
+master-code encoding, CRC-8, frame assembly, the 0x1E status, 0x33 time zone,
+0x73 access-user and the 01 01 / 01 04 setup frames) are ported from locklyctl
+(https://github.com/DigitalCyberSoft/locklyctl), which in turn ports them from
+LocklyHA (https://github.com/Forcky/LocklyHA), Copyright (c) 2024 Patrick Forck,
+under the MIT License. They are pinned to locklyctl by the test vectors.
+
+Whether a given lock will connect to a non-Lockly broker (in particular over
+TLS) is unverified hardware behaviour. See CONTRACT.md.

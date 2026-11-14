@@ -1,0 +1,272 @@
+package api
+
+import (
+	"context"
+	"crypto/aes"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/DigitalCyberSoft/locklyctl-mqtt/internal/lockly"
+	"github.com/DigitalCyberSoft/locklyctl-mqtt/internal/store"
+)
+
+const (
+	tMC   = "24860092"
+	tUUID = "2d0023003030471333363838"
+	tCID  = "cid-1"
+)
+
+// responseFrame builds a lock reply frame (magic|len|cmdType|AES(payload)|crc).
+func responseFrame(t *testing.T, cmdType, plaintextHex string) string {
+	t.Helper()
+	key, err := lockly.DeriveAESKey(tMC, tUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := hex.DecodeString(plaintextHex)
+	if pad := (16 - len(raw)%16) % 16; pad != 0 {
+		raw = append(raw, make([]byte, pad)...)
+	}
+	blk, _ := aes.NewCipher(key)
+	ct := make([]byte, len(raw))
+	for i := 0; i < len(raw); i += 16 {
+		blk.Encrypt(ct[i:i+16], raw[i:i+16])
+	}
+	ctHdr, _ := hex.DecodeString(cmdType)
+	body := append(ctHdr, ct...)
+	total := len(body) + 7 // magic(4)+len(2)+crc(1)
+	frame := []byte{0xA1, 0xB2, 0xC3, 0xD4, byte(total % 256), byte(total / 256)}
+	frame = append(frame, body...)
+	frame = append(frame, lockly.CRC8(frame))
+	return strings.ToUpper(hex.EncodeToString(frame))
+}
+
+// tryCommandByte decrypts a command frame and returns its first plaintext
+// byte; ok is false for anything that is not a well-formed AES command frame.
+func tryCommandByte(frameHex string) (string, bool) {
+	if len(frameHex) < 16 {
+		return "", false
+	}
+	key, err := lockly.DeriveAESKey(tMC, tUUID)
+	if err != nil {
+		return "", false
+	}
+	ct, err := hex.DecodeString(frameHex[12 : len(frameHex)-4])
+	if err != nil || len(ct) == 0 || len(ct)%16 != 0 {
+		return "", false
+	}
+	blk, _ := aes.NewCipher(key)
+	pt := make([]byte, 16)
+	blk.Decrypt(pt, ct[:16])
+	return strings.ToUpper(hex.EncodeToString(pt[:1])), true
+}
+
+// fakeGateway answers a status query with a nonce and accepts everything else.
+type fakeGateway struct {
+	t      *testing.T
+	online bool
+	mu     sync.Mutex
+	sent   []string // command frames seen
+}
+
+func (g *fakeGateway) Online(string) bool { return g.online }
+func (g *fakeGateway) SendCommand(_ context.Context, _, _, frameHex string) (string, error) {
+	g.mu.Lock()
+	g.sent = append(g.sent, frameHex)
+	g.mu.Unlock()
+	cmd, ok := tryCommandByte(frameHex)
+	switch {
+	case ok && cmd == "1E": // status query -> reply carrying a nonce at d[38:54]
+		return responseFrame(g.t, "0A1E", strings.Repeat("00", 19)+"1122334455667788"+strings.Repeat("00", 5)), nil
+	case ok && cmd == "73": // 0x73 user record -> status byte 00 = accepted
+		return responseFrame(g.t, "0A73", "00"+strings.Repeat("00", 15)), nil
+	default: // a plain relay (e.g. a raw frame from senddata): echo an ack
+		return responseFrame(g.t, "0A22", "00"+strings.Repeat("00", 15)), nil
+	}
+}
+func (g *fakeGateway) lastCommandOfType(t *testing.T, cmd string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i := len(g.sent) - 1; i >= 0; i-- {
+		if b, ok := tryCommandByte(g.sent[i]); ok && b == cmd {
+			return g.sent[i]
+		}
+	}
+	return ""
+}
+
+func setup(t *testing.T) (*httptest.Server, *store.Store, *fakeGateway) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := &fakeGateway{t: t, online: true}
+	a := New(st, gw, Config{MQTTHost: "mqtt.example.test", MQTTPort: 8883, HeartbeatSeconds: 300}, nil)
+	srv := httptest.NewServer(a.Handler())
+	t.Cleanup(func() { srv.Close(); st.Close() })
+	return srv, st, gw
+}
+
+func do(t *testing.T, srv *httptest.Server, method, path, token string, body any) (int, map[string]any) {
+	t.Helper()
+	var rdr *strings.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rdr = strings.NewReader(string(b))
+	} else {
+		rdr = strings.NewReader("")
+	}
+	req, _ := http.NewRequest(method, srv.URL+path, rdr)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var m map[string]any
+	_ = json.NewDecoder(res.Body).Decode(&m)
+	return res.StatusCode, m
+}
+
+func opToken(t *testing.T, srv *httptest.Server, st *store.Store) string {
+	h, _ := store.HashPassword("oppw")
+	if _, err := st.CreateOperator("admin", h); err != nil {
+		t.Fatal(err)
+	}
+	_, m := do(t, srv, "POST", "/admin/api/login", "", map[string]any{"username": "admin", "password": "oppw"})
+	tok, _ := m["token"].(string)
+	if tok == "" {
+		t.Fatal("no operator token")
+	}
+	return tok
+}
+
+func TestLocklyFacingFlow(t *testing.T) {
+	srv, st, _ := setup(t)
+	op := opToken(t, srv, st)
+
+	// operator creates an account and a lock
+	_, acc := do(t, srv, "POST", "/admin/api/accounts", op, map[string]any{"email": "owner@example.test", "password": "secret"})
+	accID := int64(acc["id"].(float64))
+	do(t, srv, "POST", "/admin/api/locks", op, map[string]any{
+		"DeviceID": tUUID, "MC": tMC, "Model": "PGK728WRHK", "TZ": "+8:00",
+		"OwnerAccountID": accID, "MQTTClientID": tCID, "MQTTUsername": "u", "MQTTPassword": "p"})
+
+	// locklyctl signs in with SHA-256(password), as the real client does
+	_, lg := do(t, srv, "POST", "/api/login", "", map[string]any{"email": "owner@example.test", "password": store.SHA256Hex("secret")})
+	if lg["cod"] != "200" {
+		t.Fatalf("login cod=%v", lg["cod"])
+	}
+	acctTok := lg["token"].(string)
+
+	// a wrong password is rejected
+	_, bad := do(t, srv, "POST", "/api/login", "", map[string]any{"email": "owner@example.test", "password": store.SHA256Hex("nope")})
+	if bad["cod"] == "200" {
+		t.Fatal("wrong password accepted")
+	}
+
+	// qrylknew returns the lock with its mc
+	_, q := do(t, srv, "POST", "/api/qrylknew", acctTok, map[string]any{})
+	arr := q["arr"].([]any)
+	if len(arr) != 1 || arr[0].(map[string]any)["mc"] != tMC {
+		t.Fatalf("qrylknew = %v", q)
+	}
+
+	// getHeartbeatTime hands back the broker to connect to
+	_, hb := do(t, srv, "POST", "/api/getHeartbeatTime", acctTok, map[string]any{"deviceId": tUUID, "model": "PGK728WRHK"})
+	mq := hb["mqttConfigs"].(map[string]any)
+	if mq["host"] != "mqtt.example.test" || hb["heartbeat"].(float64) != 300 {
+		t.Fatalf("heartbeat = %v", hb)
+	}
+
+	// senddata relays a frame and returns the ack
+	_, sd := do(t, srv, "POST", "/api/senddata", acctTok, map[string]any{"deviceId": tUUID, "cmd": "A1B2C3D40A0000110525"})
+	if sd["cod"] != "200" || sd["ack"] == nil {
+		t.Fatalf("senddata = %v", sd)
+	}
+}
+
+func TestSenddataOffline(t *testing.T) {
+	srv, st, gw := setup(t)
+	op := opToken(t, srv, st)
+	_, acc := do(t, srv, "POST", "/admin/api/accounts", op, map[string]any{"email": "o@example.test", "password": "s"})
+	do(t, srv, "POST", "/admin/api/locks", op, map[string]any{"DeviceID": tUUID, "MC": tMC,
+		"OwnerAccountID": int64(acc["id"].(float64)), "MQTTClientID": tCID})
+	_, lg := do(t, srv, "POST", "/api/login", "", map[string]any{"email": "o@example.test", "password": store.SHA256Hex("s")})
+	gw.online = false
+	_, sd := do(t, srv, "POST", "/api/senddata", lg["token"].(string), map[string]any{"deviceId": tUUID, "cmd": "A1B2"})
+	if sd["cod"] != "3005" {
+		t.Fatalf("offline senddata cod=%v, want 3005", sd["cod"])
+	}
+}
+
+func TestAuthRequired(t *testing.T) {
+	srv, _, _ := setup(t)
+	if code, _ := do(t, srv, "GET", "/admin/api/locks", "", nil); code != http.StatusUnauthorized {
+		t.Fatalf("admin without token = %d", code)
+	}
+	if _, m := do(t, srv, "POST", "/api/qrylknew", "", map[string]any{}); m["cod"] != "401" {
+		t.Fatalf("api without token cod=%v", m["cod"])
+	}
+}
+
+func TestPersonEnableDisablePush(t *testing.T) {
+	srv, st, gw := setup(t)
+	op := opToken(t, srv, st)
+	_, acc := do(t, srv, "POST", "/admin/api/accounts", op, map[string]any{"email": "o@example.test", "password": "s"})
+	_, lk := do(t, srv, "POST", "/admin/api/locks", op, map[string]any{"DeviceID": tUUID, "MC": tMC,
+		"OwnerAccountID": int64(acc["id"].(float64)), "MQTTClientID": tCID})
+	lockID := int64(lk["id"].(float64))
+
+	// create a person: pushes a 0x73 with a real (permanent) window
+	_, p := do(t, srv, "POST", "/admin/api/locks/"+itoa(lockID)+"/people", op, map[string]any{
+		"name": "Tester", "pwdId": 8, "userId": 31, "pin": "135790", "userType": 0x22, "dateMode": "permanent"})
+	if p["synced"] != true {
+		t.Fatalf("create not synced: %v", p["syncDetail"])
+	}
+	personID := int64(p["id"].(float64))
+
+	// suspend: pushes a 0x73 with the expired window and type 0x12
+	_, tg := do(t, srv, "POST", "/admin/api/people/"+itoa(personID)+"/enabled", op, map[string]any{"enabled": false})
+	if tg["enabled"] != false || tg["synced"] != true {
+		t.Fatalf("suspend result: %v", tg)
+	}
+	dis := decryptedPush(t, gw)
+	// the plaintext of a disabled push is 73 <mclen> <encmc> 01 12 ... with the
+	// expired date; assert the user_type nibble 12 and the expired date bytes.
+	if !strings.Contains(dis, "01"+"12") {
+		t.Fatalf("disabled push missing type 0x12: %s", dis)
+	}
+	if !strings.Contains(dis, strings.ToUpper(lockly.DateExpiredHex())) {
+		t.Fatalf("disabled push missing expired window: %s", dis)
+	}
+}
+
+// decryptedPush returns the decrypted plaintext hex of the most recent 0x73 push.
+func decryptedPush(t *testing.T, gw *fakeGateway) string {
+	t.Helper()
+	frame := gw.lastCommandOfType(t, "73")
+	if frame == "" {
+		t.Fatal("no 0x73 push seen")
+	}
+	key, _ := lockly.DeriveAESKey(tMC, tUUID)
+	ct, _ := hex.DecodeString(frame[12 : len(frame)-4])
+	blk, _ := aes.NewCipher(key)
+	pt := make([]byte, len(ct))
+	for i := 0; i < len(ct); i += 16 {
+		blk.Decrypt(pt[i:i+16], ct[i:i+16])
+	}
+	return strings.ToUpper(hex.EncodeToString(pt))
+}
+
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }

@@ -1,6 +1,43 @@
 package lockly
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+func TestBuildStatusQuery(t *testing.T) {
+	now := time.Date(2026, 11, 14, 9, 30, 0, 0, time.UTC)
+	if got := TimestampHex(now); got != "1a0b0e091e00" {
+		t.Fatalf("TimestampHex = %s", got)
+	}
+	got, err := BuildStatusQuery(vecMC, vecUUID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "A1B2C3D42800EE76A0AC7C82DB63D4825EB9E43A33EFEBF4733C04F38836FD6B452E9CEB6AABF50D"
+	if got != want {
+		t.Fatalf("status query mismatch:\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestParseStatusReply(t *testing.T) {
+	// 27 bytes: fw(4) status(1) v(4) time(6) prog(1) autolock(2) locktype(1) nonce(8)
+	d := "1A0B0E22" + "02" + "C803C803" + "1A0B0E091E00" + "00" + "0500" + "69" +
+		"1122334455667788" + "0000"
+	r, err := ParseStatusReply(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Nonce != "1122334455667788" {
+		t.Fatalf("nonce = %s", r.Nonce)
+	}
+	if r.FirmwareVersion != "1A0B0E22" {
+		t.Fatalf("fw = %s", r.FirmwareVersion)
+	}
+	if _, err := ParseStatusReply("00"); err == nil {
+		t.Fatal("expected error for short payload")
+	}
+}
 
 func TestTimeZoneByte(t *testing.T) {
 	cases := []struct {
@@ -34,6 +71,20 @@ func TestBuildAccessUserSet(t *testing.T) {
 	want := "A1B2C3D43800CEC828BC579673B3989371F79E131271BC9E81405E28B84BB52D52759B7F4451084DD7544DCD98CB05D0F94A52AD6CBD45C3"
 	if got != want {
 		t.Fatalf("access-user frame mismatch:\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestDateHelpers(t *testing.T) {
+	s := time.Date(2026, 11, 14, 9, 30, 0, 0, time.UTC)
+	e := time.Date(2027, 1, 2, 18, 5, 0, 0, time.UTC)
+	if got := DatePeriodHex(s, e); got != "1A0B0E091E1B01021205" {
+		t.Fatalf("DatePeriodHex = %s", got)
+	}
+	if got := DateWeeklyHex(0x7F); got != "7F000018000000000000" {
+		t.Fatalf("DateWeeklyHex = %s", got)
+	}
+	if got := DateExpiredHex(); len(got) != 20 {
+		t.Fatalf("DateExpiredHex wrong length: %s", got)
 	}
 }
 

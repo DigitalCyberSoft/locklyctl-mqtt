@@ -284,6 +284,15 @@ func (s *Store) GetLock(id int64) (*Lock, error) {
 	return scanLock(s.db.QueryRow(`SELECT `+lockCols+` FROM locks WHERE id=?`, id))
 }
 
+// GetLockByMQTTUsername looks a lock up by its provisioned MQTT username, for
+// broker authentication. The username must be non-empty.
+func (s *Store) GetLockByMQTTUsername(username string) (*Lock, error) {
+	if username == "" {
+		return nil, ErrNotFound
+	}
+	return scanLock(s.db.QueryRow(`SELECT `+lockCols+` FROM locks WHERE mqtt_username=?`, username))
+}
+
 // ListLocksByAccount returns an account's locks.
 func (s *Store) ListLocksByAccount(accountID int64) ([]Lock, error) {
 	return s.queryLocks(`SELECT `+lockCols+` FROM locks WHERE owner_account_id=? ORDER BY id`, accountID)

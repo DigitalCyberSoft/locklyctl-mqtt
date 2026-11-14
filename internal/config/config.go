@@ -1,0 +1,74 @@
+// Package config holds the server's runtime configuration and its defaults.
+package config
+
+import (
+	"crypto/tls"
+	"fmt"
+)
+
+// Config is the server configuration.
+type Config struct {
+	// HTTP management + locklyctl-facing API.
+	HTTPAddr  string // e.g. ":8080"
+	HTTPSCert string // optional: serve the HTTP API over TLS
+	HTTPSKey  string
+
+	// MQTT broker the locks connect to.
+	MQTTAddr    string // plaintext listener, e.g. ":1883" ("" to disable)
+	MQTTTLSAddr string // TLS listener, e.g. ":8883" ("" to disable)
+	MQTTCert    string // cert/key for the TLS listener
+	MQTTKey     string
+
+	// What getHeartbeatTime hands a lock: the broker it should connect to.
+	PublicMQTTHost   string
+	PublicMQTTPort   int
+	HeartbeatSeconds int
+
+	DBPath string
+}
+
+// Default returns a config with sensible defaults.
+func Default() Config {
+	return Config{
+		HTTPAddr:         ":8080",
+		MQTTAddr:         ":1883",
+		PublicMQTTPort:   1883,
+		HeartbeatSeconds: 300,
+		DBPath:           "locklyctl-mqtt.db",
+	}
+}
+
+// Validate checks the config and fills dependent defaults.
+func (c *Config) Validate() error {
+	if c.HTTPAddr == "" {
+		return fmt.Errorf("HTTPAddr is required")
+	}
+	if c.MQTTAddr == "" && c.MQTTTLSAddr == "" {
+		return fmt.Errorf("at least one of MQTTAddr or MQTTTLSAddr is required")
+	}
+	if c.MQTTTLSAddr != "" && (c.MQTTCert == "" || c.MQTTKey == "") {
+		return fmt.Errorf("MQTTTLSAddr needs MQTTCert and MQTTKey")
+	}
+	if (c.HTTPSCert == "") != (c.HTTPSKey == "") {
+		return fmt.Errorf("HTTPSCert and HTTPSKey must be set together")
+	}
+	if c.PublicMQTTPort == 0 {
+		c.PublicMQTTPort = 1883
+	}
+	if c.HeartbeatSeconds == 0 {
+		c.HeartbeatSeconds = 300
+	}
+	return nil
+}
+
+// MQTTTLSConfig loads the TLS config for the MQTT TLS listener, or nil if none.
+func (c *Config) MQTTTLSConfig() (*tls.Config, error) {
+	if c.MQTTTLSAddr == "" {
+		return nil, nil
+	}
+	cert, err := tls.LoadX509KeyPair(c.MQTTCert, c.MQTTKey)
+	if err != nil {
+		return nil, fmt.Errorf("mqtt tls: %w", err)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
+}

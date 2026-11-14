@@ -4,7 +4,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // DatePermanent is the validity window meaning "never expires" (FF x10).
@@ -63,6 +65,54 @@ func xorBytes(data, key []byte) []byte {
 	return out
 }
 
+// CmdStatusQuery is the 0x1E status command; the hub flag is "1" (padded 01).
+const CmdStatusQuery = "1E"
+
+// TimestampHex packs a time as yyMMddHHmmss, each decimal pair as one hex byte
+// (year 26 -> 0x1a), the lock's local wall clock (DataUtils.m86660o).
+func TimestampHex(t time.Time) string {
+	s := t.Format("060102150405")
+	var b strings.Builder
+	for i := 0; i < 12; i += 2 {
+		v, _ := strconv.Atoi(s[i : i+2])
+		fmt.Fprintf(&b, "%02x", v)
+	}
+	return b.String()
+}
+
+// BuildStatusQuery is the 0x1E status command, carrying the time; every
+// state-changing command needs the nonce from its reply
+// (protocol.build_query_status_cmd). Pass now in the lock's own time zone.
+func BuildStatusQuery(mc, uuid string, now time.Time) (string, error) {
+	encMc, mcLen, key, err := encParts(mc, uuid)
+	if err != nil {
+		return "", err
+	}
+	raw := AssembleFields(CmdStatusQuery, mcLen, encMc, TimestampHex(now), "1")
+	return AESWrap(raw, key, EncryptTypeAES)
+}
+
+// StatusReply is the part of a decrypted status payload this server reads.
+type StatusReply struct {
+	FirmwareVersion string // hex chars 0:8
+	LockClock       string // yyMMddHHmmss hex, chars 18:30
+	Nonce           string // 8-byte nonce, chars 38:54, echoed in the next command
+}
+
+// ParseStatusReply reads a decrypted status payload (DecryptAck output).
+// The nonce lives at bytes 19..26 (QueryLockStatusCmd data[38:54]).
+func ParseStatusReply(decryptedHex string) (StatusReply, error) {
+	if len(decryptedHex) < 54 {
+		return StatusReply{}, fmt.Errorf("status payload too short (%d hex chars)", len(decryptedHex))
+	}
+	d := strings.ToUpper(decryptedHex)
+	return StatusReply{
+		FirmwareVersion: d[0:8],
+		LockClock:       d[18:30],
+		Nonce:           d[38:54],
+	}, nil
+}
+
 // TimeZoneByte encodes a whole-hour UTC offset (SetTimeZoneCmd.getZone;
 // features.time_zone_byte): bit 7 set, bit 4 the half-hour flag (never set
 // here), bit 3 the sign (1 at or east of UTC), bits 0-3 the hours.
@@ -89,6 +139,35 @@ func BuildTimeZoneSet(mc, uuid, nonce string, hours int) (string, error) {
 	raw := AssembleFields("33", mcLen, encMc, "1", fmt.Sprintf("%02X", TimeZoneByte(hours)), strings.ToUpper(nonce))
 	return AESWrap(raw, key, EncryptTypeAES)
 }
+
+// DatePermanentHex is the "never expires" window (FF x10).
+const DatePermanentHex = DatePermanent
+
+func periodField(t time.Time) string {
+	s := t.Format("0601021504") // yyMMddHHmm
+	var b strings.Builder
+	for i := 0; i < 10; i += 2 {
+		v, _ := strconv.Atoi(s[i : i+2])
+		fmt.Fprintf(&b, "%02x", v)
+	}
+	return strings.ToUpper(b.String())
+}
+
+// DatePeriodHex is a fixed validity window: yyMMddHHmm start then end
+// (access_date_period). Times are the lock's local wall clock.
+func DatePeriodHex(start, end time.Time) string {
+	return periodField(start) + periodField(end)
+}
+
+// DateWeeklyHex is a recurring weekly schedule: a weekday bitmask then an
+// all-day window, as the lock stores it (e.g. 0x7F -> 7F000018...).
+func DateWeeklyHex(weekMask int) string {
+	return fmt.Sprintf("%02X", weekMask&0xFF) + "00001800" + "0000000000"
+}
+
+// DateExpiredHex is a window entirely in the past, so the lock always denies:
+// the basis of a credential-preserving suspend. Pair it with user type 0x12.
+func DateExpiredHex() string { return "00010100000001010000" } // 2000-01-01, zero length
 
 // AccessUser is one person's record to push to an access-user lock (Visage).
 type AccessUser struct {
