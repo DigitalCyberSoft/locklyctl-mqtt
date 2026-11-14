@@ -1,0 +1,60 @@
+# Tests on Linux, macOS and Windows, then checks that every release target
+# builds. The MQTT tests in internal/server talk to the broker over real
+# sockets (plain and TLS), so a green run means a lock-shaped client can sign
+# in, receive a command and answer it on each of these systems.
+# Runs on every push to master, on pull requests and from the Actions tab.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 ./...
+      - name: Test with the race detector
+        if: runner.os == 'Linux'
+        run: go test -race -count=1 ./...
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build every target
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            echo "== $target"
+            GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./cmd/locklyctl-mqtt
+          done

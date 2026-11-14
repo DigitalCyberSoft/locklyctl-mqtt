@@ -46,6 +46,9 @@ $ go test ./...
 $ ./locklyctl-mqtt serve -public-mqtt-host your.host.example -public-mqtt-port 1883
 ```
 
+CI (`.github/workflows/ci.yml`) runs the tests on Linux, macOS and Windows and
+builds every release target (Linux, macOS and Windows, amd64 and arm64).
+
 Bootstrap (before the console is useful):
 
 ```console
