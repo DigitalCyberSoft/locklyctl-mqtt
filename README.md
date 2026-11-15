@@ -14,6 +14,18 @@ channel. locklyctl points at it with `--server`.
 > Lockly-signed server cert). Prove it on a spare lock before relying on it. See
 > `CONTRACT.md`.
 
+<p>
+  <img src="docs/screenshots/console-desktop.png" alt="The operator console on a computer: locks grouped by account, each online or offline with move and hide buttons; the accounts; and one lock's last reported state and its people, each enabled or suspended, with a form to add a person" width="100%">
+</p>
+<p>
+  <img src="docs/screenshots/console-phone.png" alt="The console on a phone: the locks of two accounts, one offline, with one more hidden behind Show hidden" width="32%">
+  <img src="docs/screenshots/console-phone-lock.png" alt="The console on a phone, dark mode: one lock's state and its people, one of them suspended" width="32%">
+</p>
+
+<sub>Screenshots use made-up sample data (`tools/screenshots/mock.js`, which
+stands in for the console's API), not a running server. Rendered with
+`node tools/screenshots/screenshots.mjs`.</sub>
+
 ## What it does
 
 - **MQTT broker** the locks connect to (plaintext and/or TLS), speaking the
@@ -38,6 +50,7 @@ channel. locklyctl points at it with `--server`.
 | `internal/web` | the management web console (embedded) |
 | `internal/server` | wiring |
 | `cmd/locklyctl-mqtt` | the `serve` and admin CLI |
+| `tools/screenshots` | the console screenshots above, rendered from made-up data (Node 22 and Chrome; not part of the build) |
 
 ## Build, test, run
 
