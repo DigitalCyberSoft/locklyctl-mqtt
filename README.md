@@ -20,7 +20,8 @@ channel. locklyctl points at it with `--server`.
   Lockly device channel (`lockCommandRequest`/`Response`, `deviceStateCallback`,
   event log).
 - **locklyctl-facing REST API** that mirrors the Lockly endpoints locklyctl
-  calls, so `locklyctl --server https://you login` is a base-URL swap.
+  calls, so pointing locklyctl at it (`--server https://you`, or "A private
+  server" on its sign-in screen) is a base-URL swap.
 - **Management API + web console** to create logins (the accounts locklyctl
   signs in as), register locks, and manage people: PINs, schedules, and a
   first-class **enable/disable** that suspends a person by pushing an expired
@@ -58,14 +59,22 @@ $ ./locklyctl-mqtt add-lock -device-id <hex> -mc <code> -owner <accountId> \
       -model PGK728WRHK -mqtt-client-id <id> -mqtt-username <u> -mqtt-password <p>
 ```
 
-Then open `http://host:8080/` for the console, and point locklyctl at it:
+Then open `http://host:8080/` for the console, and point locklyctl at it. In
+its desktop or phone app, choose "A private server" on the sign-in screen (or
+Settings, Account, "Sign in somewhere else") and give `http://host:8080`. From
+the command line:
 
 ```console
-$ locklyctl --server http://host:8080 login
+$ locklyctl --server http://host:8080        # the menus: sign in, and choose to stay signed in
+$ locklyctl list                             # later commands use the server the sign-in was kept for
 $ locklyctl wifi <LOCK> --ssid <net> --mqtt-host your.host.example --mqtt-port 1883
 ```
 
-The last command writes your broker into the lock during Wi-Fi setup.
+The last command writes your broker into the lock during Wi-Fi setup (the
+app's Maintenance, Wi-Fi, "MQTT server" does the same). A lock's Wi-Fi setup
+holds a port of up to 4 digits. Serve the API over TLS anywhere but on the
+machine itself: over plain http the password and the locks' master codes
+cross the network readable.
 
 ### Docker
 
